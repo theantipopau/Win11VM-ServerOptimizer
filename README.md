@@ -6,7 +6,7 @@
 
 [GitHub Repository](https://github.com/theantipopau/Win11VM-ServerOptimizer)
 
-**Current version: v1.1.0**
+**Current version: v1.2.0** ([changelog](CHANGELOG.md))
 
 A PowerShell script that strips down a fresh Windows 11 Pro install for use as a **dedicated, headless-leaning server host** — game servers ([AMP](https://cubecoders.com/AMP), standalone Source/Java/Bedrock, etc.), media servers (Plex, Jellyfin, Emby), file shares, or any other always-on service.
 
@@ -39,6 +39,7 @@ This script instead:
 - **Power** — High Performance power plan, hibernation and Fast Startup disabled, sleep timers disabled (AC & DC)
 - **Visual effects** — set to Best Performance, transparency disabled (irrelevant over RDP anyway, but it's one less thing burning cycles)
 - **Windows Update** — set to Manual (not disabled — security patching still applies on demand)
+- **Network & background tasks** — removes the ~10Mbps throttle Windows puts on background network traffic (`NetworkThrottlingIndex`), stops reserving CPU for foreground multimedia that doesn't exist on a headless box (`SystemResponsiveness`), sets Delivery Optimization to HTTP-only (no peer-to-peer upload/download), disables Game Bar/GameDVR, and disables NIC power management so adapters can't be put to sleep under load
 - **Defender** — optional exclusions for your server data folders (AMP instances, Plex/Jellyfin libraries, etc.), recommended over disabling Defender
 - **Cleanup** — temp folders cleared on every run
 
@@ -81,9 +82,53 @@ Reboot once it completes, then install/configure your server software as normal.
 | Parameter | Description |
 |---|---|
 | `-DryRun` | Logs what would change without making changes |
+| `-Force` | Skips the confirmation prompt before making changes (for unattended/scripted runs) |
 | `-ExclusionPaths` | One or more folders (AMP instances, Plex/Jellyfin library or transcode dirs, game server data, etc.) to add as Windows Defender exclusions |
 | `-DisableDefender` | Fully disables Defender real-time protection (not recommended — prefer `-ExclusionPaths` above) |
 | `-LogPath` | Where to write the log file (defaults to Desktop) |
+
+Running without `-DryRun` or `-Force` prompts for confirmation before making any changes.
+
+---
+
+## Optional: installing server software
+
+`Install-ServerSoftware.ps1` is a separate, opt-in companion script. The optimizer above only ever removes/configures — it never installs anything — so software installation lives in its own script instead of being bolted on. Running it with no switches does nothing.
+
+Everything installs through [winget](https://learn.microsoft.com/en-us/windows/package-manager/winget/) (built-in, Microsoft-signed) rather than downloading installers from random URLs.
+
+```powershell
+# See what would install without installing anything
+.\scripts\Install-ServerSoftware.ps1 -DryRun -All
+
+# Pick specific software
+.\scripts\Install-ServerSoftware.ps1 -DockerEngine -Jellyfin
+
+# Anything not covered by a named switch - find IDs with `winget search <name>`
+.\scripts\Install-ServerSoftware.ps1 -WingetId "Valve.Steam"
+```
+
+Or double-click `Run-Install-ServerSoftware.bat` (same self-elevation as the optimizer's launcher), passing flags the same way.
+
+### Parameters
+
+| Parameter | Description |
+|---|---|
+| `-DryRun` | Logs what would be installed without installing |
+| `-Force` | Skips the confirmation prompt before installing anything (for unattended/scripted runs) |
+| `-DockerEngine` | Installs **Docker Engine** (headless, service-based) — not Docker Desktop. See below for why. |
+| `-Plex` | Installs Plex Media Server |
+| `-Jellyfin` | Installs Jellyfin Server |
+| `-Emby` | Installs Emby Server |
+| `-WingetId` | One or more extra winget package IDs to install as-is |
+| `-All` | Shorthand for `-DockerEngine -Plex -Jellyfin -Emby` |
+| `-LogPath` | Where to write the log file (defaults to Desktop) |
+
+Running without `-DryRun` or `-Force` prompts for confirmation before installing anything. `-DockerEngine` needs to be run twice: once to enable the `Containers` feature, then again after a reboot to actually install Docker.
+
+### Why Docker Engine, not Docker Desktop
+
+Docker Desktop is a GUI app with a system-tray presence, its own update cycle, and a license that requires payment for larger commercial use — the opposite of what a headless, stripped-down server wants. `-DockerEngine` instead enables the Windows `Containers` optional feature and installs Docker as a background service (`dockerd`) via the `DockerMsftProvider` PowerShell module — the same method Microsoft's own Windows Server documentation uses. **A restart is required** after the feature is enabled before Docker will run.
 
 ---
 

@@ -25,9 +25,14 @@
       - Visual effects (set to Best Performance)
       - SysMain/Superfetch, Fast Startup, hibernation (VMs don't benefit from these, they just burn disk/RAM)
       - Background app permissions, unneeded scheduled tasks (Customer Experience, Feedback, etc.)
+      - Network throttling on background traffic, Game Bar/GameDVR, Delivery Optimization P2P sharing,
+        NIC power management (prevents adapters sleeping under load)
 
 .PARAMETER DryRun
     Shows what would change without making changes.
+
+.PARAMETER Force
+    Skips the "are you sure?" confirmation prompt before making changes. Use for unattended/scripted runs.
 
 .PARAMETER DisableDefender
     Also disables Windows Defender real-time protection (NOT recommended unless this box is fully
@@ -50,6 +55,7 @@
 [CmdletBinding()]
 param(
     [switch]$DryRun,
+    [switch]$Force,
     [switch]$DisableDefender,
     [string[]]$ExclusionPaths,
     [string]$LogPath = "$env:USERPROFILE\Desktop\Win11VM-ServerOptimizer.log"
@@ -57,7 +63,7 @@ param(
 
 $ErrorActionPreference = 'Continue'
 $script:changes = 0
-$script:ScriptVersion = '1.1.0'
+$script:ScriptVersion = '1.2.0'
 
 function Write-Banner {
     $lines = @(
@@ -93,8 +99,12 @@ function Invoke-Action {
         Write-Log "DRY RUN - would do: $Description" 'DRYRUN'
         return
     }
+    $global:LASTEXITCODE = 0
     try {
         & $Action
+        if ($LASTEXITCODE) {
+            throw "native command exited with code $LASTEXITCODE"
+        }
         Write-Log $Description 'OK'
         $script:changes++
     } catch {
@@ -104,6 +114,14 @@ function Invoke-Action {
 
 Write-Banner
 Write-Log "=== Win11VM-ServerOptimizer v$script:ScriptVersion starting (DryRun=$DryRun) ==="
+
+if (-not $DryRun -and -not $Force) {
+    $confirm = Read-Host "This will modify system settings, services, and the registry on THIS machine. Continue? [y/N]"
+    if ($confirm -notmatch '^(y|yes)$') {
+        Write-Log "User declined confirmation - exiting without making changes." 'WARN'
+        exit 0
+    }
+}
 
 # ---------------------------------------------------------------------------
 # PHASE 1: Remove consumer AppX bloat
@@ -301,7 +319,32 @@ Invoke-Action "Disable transparency effects" {
 }
 
 # ---------------------------------------------------------------------------
-# PHASE 8: Defender exclusions for server data folders (safer than disabling Defender)
+# PHASE 8: Network & background-task tuning for server workloads
+# ---------------------------------------------------------------------------
+Write-Log "--- Phase 8: Network & background-task tuning ---"
+
+$serverRegTweaks = @(
+    @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"; Name = "NetworkThrottlingIndex"; Value = 0xffffffff; Type = "DWord" }  # removes the ~10Mbps cap Windows puts on background network traffic
+    @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"; Name = "SystemResponsiveness"; Value = 0; Type = "DWord" }             # stop reserving CPU for foreground multimedia - there is none on a headless box
+    @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization"; Name = "DODownloadMode"; Value = 0; Type = "DWord" }                               # HTTP only - no peer-to-peer upload/download of Windows Update payloads
+    @{ Path = "HKCU:\System\GameConfigStore"; Name = "GameDVR_Enabled"; Value = 0; Type = "DWord" }
+    @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR"; Name = "AllowGameDVR"; Value = 0; Type = "DWord" }
+)
+
+foreach ($tweak in $serverRegTweaks) {
+    Invoke-Action "Set $($tweak.Path)\$($tweak.Name) = $($tweak.Value)" {
+        if (-not (Test-Path $tweak.Path)) { New-Item -Path $tweak.Path -Force | Out-Null }
+        New-ItemProperty -Path $tweak.Path -Name $tweak.Name -Value $tweak.Value -PropertyType $tweak.Type -Force | Out-Null
+    }
+}
+
+Invoke-Action "Disable power management on network adapters (prevent NIC sleep)" {
+    Get-NetAdapterPowerManagement -ErrorAction SilentlyContinue |
+        Set-NetAdapterPowerManagement -AllowComputerToTurnOffDevice Disabled -ErrorAction SilentlyContinue
+}
+
+# ---------------------------------------------------------------------------
+# PHASE 9: Defender exclusions for server data folders (safer than disabling Defender)
 # ---------------------------------------------------------------------------
 if ($ExclusionPaths) {
     foreach ($path in $ExclusionPaths) {
@@ -321,9 +364,9 @@ if ($DisableDefender) {
 }
 
 # ---------------------------------------------------------------------------
-# PHASE 9: Cleanup
+# PHASE 10: Cleanup
 # ---------------------------------------------------------------------------
-Write-Log "--- Phase 9: Cleanup ---"
+Write-Log "--- Phase 10: Cleanup ---"
 Invoke-Action "Clear temp files" {
     Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -Path "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
