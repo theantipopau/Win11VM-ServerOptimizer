@@ -1,10 +1,10 @@
 @echo off
-:: Win11 AMP Server Optimizer - double-click launcher
+:: Win11VM Server Optimizer - double-click launcher
 :: by Matt Hurley - https://matthurley.dev
 :: Self-elevates to admin, then hands off to the PowerShell script.
 :: Any arguments passed to this .bat are forwarded as-is, e.g.:
 ::   Run-Win11VM-ServerOptimizer.bat -DryRun
-::   Run-Win11VM-ServerOptimizer.bat -AmpInstancesPath "C:\AMP\Instances"
+::   Run-Win11VM-ServerOptimizer.bat -ExclusionPaths "C:\AMP\Instances","D:\Plex\Transcode"
 
 setlocal
 

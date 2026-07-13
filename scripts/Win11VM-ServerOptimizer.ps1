@@ -1,17 +1,19 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Win11VM-ServerOptimizer - Strips a Windows 11 Pro VM down for headless/AMP game server hosting.
+    Win11VM-ServerOptimizer - Strips a Windows 11 Pro VM/host down for dedicated server hosting.
 
 .DESCRIPTION
-    Designed for VMs whose ONLY job is running game servers via CubeCoders AMP.
-    No GUI gaming, no word processing, no general desktop use expected on the box itself.
+    Designed for machines whose ONLY job is running server workloads - game servers (AMP,
+    standalone, Source/Java/Bedrock, etc.), media servers (Plex, Jellyfin, Emby), file shares,
+    or any other headless-leaning service. No GUI gaming, no word processing, no general desktop
+    use expected on the box itself.
 
-    Deliberately left ALONE (do not touch, AMP / server role depends on these):
+    Deliberately left ALONE (do not touch, server roles depend on these):
       - .NET Framework / .NET Desktop Runtime
       - Networking stack, NIC drivers, Windows Firewall service (rules are only tidied, not disabled)
       - Remote Desktop (RDP) - assumed to be your main access method
-      - Windows Time service (w32time) - game servers care about accurate time
+      - Windows Time service (w32time) - game/media servers care about accurate time
       - Windows Update service (set to notify, not disabled outright - security patches still matter)
       - Windows Defender (excluded from removal by default - use -DisableDefender to opt out, not recommended)
 
@@ -28,42 +30,43 @@
     Shows what would change without making changes.
 
 .PARAMETER DisableDefender
-    Also disables Windows Defender real-time protection (NOT recommended unless this VM is fully
-    network-isolated - AMP downloads/updates game server files constantly, an AV exclusion on the
-    AMP instances folder is usually the better/safer option, see bottom of script).
+    Also disables Windows Defender real-time protection (NOT recommended unless this box is fully
+    network-isolated - most server workloads download/update files constantly, an AV exclusion on
+    your data/instances folder is usually the better/safer option, see -ExclusionPaths below).
 
-.PARAMETER AmpInstancesPath
-    Path to your AMP instances folder, used to add a Defender exclusion instead of disabling Defender
-    entirely. Example: "C:\AMP\Instances"
+.PARAMETER ExclusionPaths
+    One or more folders to add as Windows Defender exclusions instead of disabling Defender
+    entirely - e.g. AMP instances, a Plex/Jellyfin library or transcode folder, a game server's
+    data directory. Example: -ExclusionPaths "C:\AMP\Instances","D:\Plex\Transcode"
 
 .PARAMETER LogPath
     Where to write the log file. Defaults to Desktop.
 
 .EXAMPLE
     .\Win11VM-ServerOptimizer.ps1 -DryRun
-    .\Win11VM-ServerOptimizer.ps1 -AmpInstancesPath "C:\AMP\Instances"
+    .\Win11VM-ServerOptimizer.ps1 -ExclusionPaths "C:\AMP\Instances","D:\Plex\Transcode"
 #>
 
 [CmdletBinding()]
 param(
     [switch]$DryRun,
     [switch]$DisableDefender,
-    [string]$AmpInstancesPath,
+    [string[]]$ExclusionPaths,
     [string]$LogPath = "$env:USERPROFILE\Desktop\Win11VM-ServerOptimizer.log"
 )
 
 $ErrorActionPreference = 'Continue'
 $script:changes = 0
-$script:ScriptVersion = '1.0.0'
+$script:ScriptVersion = '1.1.0'
 
 function Write-Banner {
     $lines = @(
-        "Win11 AMP Server Optimizer  v$script:ScriptVersion"
-        "Windows 11 VM debloat & tuning for CubeCoders AMP hosts"
+        "Win11VM Server Optimizer  v$script:ScriptVersion"
+        "Optimize. Streamline. Perform."
         ""
         "Author : Matt Hurley"
         "Web    : https://matthurley.dev"
-        "Repo   : https://github.com/theantipopau/win11-amp-server-optimizer"
+        "Repo   : https://github.com/theantipopau/Win11VM-ServerOptimizer"
     )
     $width = (($lines | Measure-Object -Property Length -Maximum).Maximum) + 4
     $border = '+' + ('-' * $width) + '+'
@@ -298,18 +301,20 @@ Invoke-Action "Disable transparency effects" {
 }
 
 # ---------------------------------------------------------------------------
-# PHASE 8: Defender exclusion for AMP (safer than disabling Defender)
+# PHASE 8: Defender exclusions for server data folders (safer than disabling Defender)
 # ---------------------------------------------------------------------------
-if ($AmpInstancesPath) {
-    Invoke-Action "Add Defender exclusion for AMP instances folder: $AmpInstancesPath" {
-        Add-MpPreference -ExclusionPath $AmpInstancesPath -ErrorAction SilentlyContinue
+if ($ExclusionPaths) {
+    foreach ($path in $ExclusionPaths) {
+        Invoke-Action "Add Defender exclusion for folder: $path" {
+            Add-MpPreference -ExclusionPath $path -ErrorAction SilentlyContinue
+        }
     }
 } else {
-    Write-Log "No -AmpInstancesPath supplied - skipping Defender exclusion. Recommend re-running with it once AMP is installed, e.g. -AmpInstancesPath 'C:\AMP\Instances'" 'WARN'
+    Write-Log "No -ExclusionPaths supplied - skipping Defender exclusions. Recommend re-running with your server data folders once installed, e.g. -ExclusionPaths 'C:\AMP\Instances','D:\Plex\Transcode'" 'WARN'
 }
 
 if ($DisableDefender) {
-    Write-Log "DisableDefender flag set - disabling real-time protection. NOT recommended for AMP hosts that pull updates from the internet." 'WARN'
+    Write-Log "DisableDefender flag set - disabling real-time protection. NOT recommended for hosts that pull updates/media from the internet." 'WARN'
     Invoke-Action "Disable Windows Defender real-time protection" {
         Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
     }
@@ -324,7 +329,7 @@ Invoke-Action "Clear temp files" {
     Remove-Item -Path "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-Write-Log "=== Complete. $script:changes change(s) applied. A restart is recommended before spinning up AMP instances. ==="
+Write-Log "=== Complete. $script:changes change(s) applied. A restart is recommended before starting your server workloads. ==="
 
 if ($DryRun) {
     Write-Log "This was a DRY RUN - nothing was actually changed. Re-run without -DryRun to apply." 'DRYRUN'

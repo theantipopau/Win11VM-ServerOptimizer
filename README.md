@@ -1,26 +1,28 @@
-# Win11 AMP Server Optimizer
+![Win11VM Server Optimizer](images/header.PNG)
+
+# Win11VM Server Optimizer
 
 **by Matt Hurley** — [matthurley.dev](https://matthurley.dev)
 
-[GitHub Repository](https://github.com/theantipopau/win11-amp-server-optimizer)
+[GitHub Repository](https://github.com/theantipopau/Win11VM-ServerOptimizer)
 
-**Current version: v1.0.0**
+**Current version: v1.1.0**
 
-A PowerShell script that strips down a fresh Windows 11 Pro install for use as a **dedicated, headless-leaning game server host** running [AMP (CubeCoders Application Management Panel)](https://cubecoders.com/AMP).
+A PowerShell script that strips down a fresh Windows 11 Pro install for use as a **dedicated, headless-leaning server host** — game servers ([AMP](https://cubecoders.com/AMP), standalone Source/Java/Bedrock, etc.), media servers (Plex, Jellyfin, Emby), file shares, or any other always-on service.
 
-Unlike a general-purpose desktop debloat, this is scoped specifically for VMs whose only job is running AMP and its game server instances — no desktop use, no gaming on the box itself, no Office/word processing.
+Unlike a general-purpose desktop debloat, this is scoped specifically for machines whose only job is running server workloads — no desktop use, no gaming on the box itself, no Office/word processing.
 
 ---
 
 ## Why this exists, and why not just use a general debloater
 
-General debloat tools (Win11Debloat, WinUtil, etc.) are built around desktop/gaming-PC use cases. Running them as-is on a server VM risks stripping or disabling things a server role actually needs, and they don't account for AMP-specific concerns (Defender scanning instance folders, no need to preserve GPU/gaming stack, etc.).
+General debloat tools (Win11Debloat, WinUtil, etc.) are built around desktop/gaming-PC use cases. Running them as-is on a server VM risks stripping or disabling things a server role actually needs, and they don't account for server-specific concerns (Defender scanning large data folders, no need to preserve GPU/gaming stack, etc.).
 
 This script instead:
 
 - **Explicitly leaves alone**: RDP, networking stack, Windows Firewall service, .NET runtimes, Windows Time service, Windows Update (set to manual, not disabled).
 - **Strips aggressively**: consumer AppX bloat (Xbox stack, Widgets, Copilot, Cortana, OneDrive, etc.), telemetry, Search indexing, SysMain/Superfetch, hibernation/Fast Startup, unneeded scheduled tasks and services.
-- **Understands AMP**: optional `-AmpInstancesPath` parameter adds a Defender exclusion for your instances folder instead of disabling Defender outright.
+- **Understands server workloads**: optional `-ExclusionPaths` parameter adds Defender exclusions for your AMP instances, Plex/Jellyfin library or transcode folders, or any other data directory — instead of disabling Defender outright.
 
 ---
 
@@ -37,7 +39,7 @@ This script instead:
 - **Power** — High Performance power plan, hibernation and Fast Startup disabled, sleep timers disabled (AC & DC)
 - **Visual effects** — set to Best Performance, transparency disabled (irrelevant over RDP anyway, but it's one less thing burning cycles)
 - **Windows Update** — set to Manual (not disabled — security patching still applies on demand)
-- **Defender** — optional exclusion for your AMP instances folder (recommended over disabling Defender)
+- **Defender** — optional exclusions for your server data folders (AMP instances, Plex/Jellyfin libraries, etc.), recommended over disabling Defender
 - **Cleanup** — temp folders cleared on every run
 
 ### Deliberately left alone
@@ -68,19 +70,19 @@ Pass flags straight through to the launcher, e.g. `Run-Win11VM-ServerOptimizer.b
 # Always dry-run first
 .\scripts\Win11VM-ServerOptimizer.ps1 -DryRun
 
-# Apply, with a Defender exclusion for your AMP instances folder
-.\scripts\Win11VM-ServerOptimizer.ps1 -AmpInstancesPath "C:\AMP\Instances"
+# Apply, with Defender exclusions for your server data folders
+.\scripts\Win11VM-ServerOptimizer.ps1 -ExclusionPaths "C:\AMP\Instances","D:\Plex\Transcode"
 ```
 
-Reboot once it completes, then install/configure AMP as normal. The script is idempotent, so it's safe to re-run after Windows Updates re-enable something.
+Reboot once it completes, then install/configure your server software as normal. The script is idempotent, so it's safe to re-run after Windows Updates re-enable something.
 
 ### Parameters
 
 | Parameter | Description |
 |---|---|
 | `-DryRun` | Logs what would change without making changes |
-| `-AmpInstancesPath` | Path to your AMP instances folder; adds a Windows Defender exclusion |
-| `-DisableDefender` | Fully disables Defender real-time protection (not recommended — prefer the exclusion above) |
+| `-ExclusionPaths` | One or more folders (AMP instances, Plex/Jellyfin library or transcode dirs, game server data, etc.) to add as Windows Defender exclusions |
+| `-DisableDefender` | Fully disables Defender real-time protection (not recommended — prefer `-ExclusionPaths` above) |
 | `-LogPath` | Where to write the log file (defaults to Desktop) |
 
 ---
