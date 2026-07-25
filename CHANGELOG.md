@@ -2,6 +2,11 @@
 
 This project has two independently-versioned scripts: `Win11VM-ServerOptimizer.ps1` (strips/configures the OS) and `Install-ServerSoftware.ps1` (opt-in software installer). Each entry below notes which one it applies to.
 
+## [1.3.0] - 2026-07-13 (Win11VM-ServerOptimizer.ps1)
+### Added
+- Pre-flight detection of already-running server software (Plex, Sonarr, Radarr, Prowlarr, Bazarr, Lidarr, Readarr, qBittorrent, SABnzbd, NZBGet, Deluge, Transmission), surfaced in the confirmation prompt
+- Temp-file cleanup (Phase 10) is now skipped entirely if any of the above is detected running, instead of risking an active transcode or archive extraction's temp files
+
 ## [1.2.0] - 2026-07-13 (Win11VM-ServerOptimizer.ps1)
 ### Added
 - Network & background-task tuning phase: `NetworkThrottlingIndex` removed, `SystemResponsiveness` set to 0, Delivery Optimization forced to HTTP-only, Game Bar/GameDVR disabled, NIC power management disabled

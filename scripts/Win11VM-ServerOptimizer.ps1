@@ -28,6 +28,11 @@
       - Network throttling on background traffic, Game Bar/GameDVR, Delivery Optimization P2P sharing,
         NIC power management (prevents adapters sleeping under load)
 
+    Before making changes, checks for common already-running server software (Plex, Sonarr, Radarr,
+    Prowlarr, Bazarr, Lidarr, Readarr, qBittorrent, SABnzbd, NZBGet, Deluge, Transmission) and surfaces
+    it in the confirmation prompt. If any of it is running, the temp-file cleanup phase is skipped
+    entirely rather than risk touching an active transcode or extraction's temp files.
+
 .PARAMETER DryRun
     Shows what would change without making changes.
 
@@ -63,7 +68,7 @@ param(
 
 $ErrorActionPreference = 'Continue'
 $script:changes = 0
-$script:ScriptVersion = '1.2.0'
+$script:ScriptVersion = '1.3.0'
 
 function Write-Banner {
     $lines = @(
@@ -112,11 +117,43 @@ function Invoke-Action {
     }
 }
 
+$knownServerProcessNames = @(
+    "Plex Media Server"
+    "Plex Media Scanner"
+    "PlexTranscoder"
+    "Sonarr"
+    "Radarr"
+    "Prowlarr"
+    "Bazarr"
+    "Lidarr"
+    "Readarr"
+    "qbittorrent"
+    "SABnzbd"
+    "nzbget"
+    "deluge*"
+    "transmission*"
+)
+
+function Get-RunningServerProcesses {
+    Get-Process -Name $knownServerProcessNames -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty ProcessName -Unique | Sort-Object
+}
+
 Write-Banner
 Write-Log "=== Win11VM-ServerOptimizer v$script:ScriptVersion starting (DryRun=$DryRun) ==="
 
+$script:runningServerProcesses = Get-RunningServerProcesses
+if ($script:runningServerProcesses) {
+    Write-Log "Detected running server software: $($script:runningServerProcesses -join ', '). This script does not stop or touch these directly, but the recommended restart afterward will." 'WARN'
+}
+
 if (-not $DryRun -and -not $Force) {
-    $confirm = Read-Host "This will modify system settings, services, and the registry on THIS machine. Continue? [y/N]"
+    $confirmMessage = "This will modify system settings, services, and the registry on THIS machine."
+    if ($script:runningServerProcesses) {
+        $confirmMessage += " Detected running: $($script:runningServerProcesses -join ', ')."
+    }
+    $confirmMessage += " Continue? [y/N]"
+    $confirm = Read-Host $confirmMessage
     if ($confirm -notmatch '^(y|yes)$') {
         Write-Log "User declined confirmation - exiting without making changes." 'WARN'
         exit 0
@@ -367,9 +404,14 @@ if ($DisableDefender) {
 # PHASE 10: Cleanup
 # ---------------------------------------------------------------------------
 Write-Log "--- Phase 10: Cleanup ---"
-Invoke-Action "Clear temp files" {
-    Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item -Path "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
+
+if ($script:runningServerProcesses) {
+    Write-Log "Skipping temp file cleanup - server software is running ($($script:runningServerProcesses -join ', ')) and may be using temp folders for active transcodes or archive extraction. Re-run during a maintenance window to clean up temp files." 'WARN'
+} else {
+    Invoke-Action "Clear temp files" {
+        Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 Write-Log "=== Complete. $script:changes change(s) applied. A restart is recommended before starting your server workloads. ==="

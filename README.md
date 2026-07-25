@@ -6,7 +6,7 @@
 
 [GitHub Repository](https://github.com/theantipopau/Win11VM-ServerOptimizer)
 
-**Current version: v1.2.0** ([changelog](CHANGELOG.md))
+**Current version: v1.3.0** ([changelog](CHANGELOG.md))
 
 A PowerShell script that strips down a fresh Windows 11 Pro install for use as a **dedicated, headless-leaning server host** — game servers ([AMP](https://cubecoders.com/AMP), standalone Source/Java/Bedrock, etc.), media servers (Plex, Jellyfin, Emby), file shares, or any other always-on service.
 
@@ -87,7 +87,7 @@ Reboot once it completes, then install/configure your server software as normal.
 | `-DisableDefender` | Fully disables Defender real-time protection (not recommended — prefer `-ExclusionPaths` above) |
 | `-LogPath` | Where to write the log file (defaults to Desktop) |
 
-Running without `-DryRun` or `-Force` prompts for confirmation before making any changes.
+Running without `-DryRun` or `-Force` prompts for confirmation before making any changes. Before that prompt, the script checks for already-running server software (Plex, Sonarr, Radarr, Prowlarr, Bazarr, Lidarr, Readarr, qBittorrent, SABnzbd, NZBGet, Deluge, Transmission) and surfaces it so you know what's live before you continue. If any of it is detected, the temp-file cleanup phase (Phase 10) is skipped entirely, rather than risk touching an active transcode or archive-extraction's temp files — re-run during a maintenance window to clean those up.
 
 ---
 
