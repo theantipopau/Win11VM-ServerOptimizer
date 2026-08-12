@@ -46,11 +46,19 @@
     One or more additional winget package IDs to install as-is, e.g. -WingetId "Valve.Steam","RARLab.WinRAR".
     Use `winget search <name>` to find IDs for anything not covered by the switches above.
 
+    NOTE: when launching via the .bat launcher or any other "-File" invocation, PowerShell does not
+    parse comma-separated arrays the way it does in an interactive session - multiple values collapse
+    into one string. To work around this, a single value containing commas or semicolons is split
+    automatically, so both of these work identically:
+      -WingetId "Valve.Steam","RARLab.WinRAR"     (interactive session)
+      -WingetId "Valve.Steam;RARLab.WinRAR"       (.bat launcher / -File)
+
 .PARAMETER All
     Shorthand for -DockerEngine -Plex -Jellyfin -Emby.
 
 .PARAMETER LogPath
-    Where to write the log file. Defaults to Desktop.
+    Where to write the log file. Defaults to a folder under ProgramData (works regardless of whether
+    the current user's Desktop exists, e.g. when OneDrive Known Folder Move has relocated it).
 
 .EXAMPLE
     .\Install-ServerSoftware.ps1 -DryRun -All
@@ -68,8 +76,23 @@ param(
     [switch]$Emby,
     [string[]]$WingetId,
     [switch]$All,
-    [string]$LogPath = "$env:USERPROFILE\Desktop\Install-ServerSoftware.log"
+    [string]$LogPath = "$env:ProgramData\Win11VM-ServerOptimizer\Install-ServerSoftware.log"
 )
+
+if ($WingetId) {
+    $WingetId = $WingetId | ForEach-Object { $_ -split '[,;]' } | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+}
+
+$logDir = Split-Path -Path $LogPath -Parent
+if (-not (Test-Path $logDir)) {
+    try {
+        New-Item -Path $logDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
+    } catch {
+        $fallback = Join-Path $env:TEMP "Install-ServerSoftware.log"
+        Write-Host "WARNING: Could not create log directory '$logDir' ($($_.Exception.Message)). Falling back to '$fallback'." -ForegroundColor Yellow
+        $LogPath = $fallback
+    }
+}
 
 if ($All) {
     $DockerEngine = $true
@@ -80,7 +103,7 @@ if ($All) {
 
 $ErrorActionPreference = 'Continue'
 $script:changes = 0
-$script:ScriptVersion = '1.1.0'
+$script:ScriptVersion = '1.2.0'
 
 function Write-Banner {
     $lines = @(

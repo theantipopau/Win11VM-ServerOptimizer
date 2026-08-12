@@ -28,10 +28,11 @@
       - Network throttling on background traffic, Game Bar/GameDVR, Delivery Optimization P2P sharing,
         NIC power management (prevents adapters sleeping under load)
 
-    Before making changes, checks for common already-running server software (Plex, Sonarr, Radarr,
-    Prowlarr, Bazarr, Lidarr, Readarr, qBittorrent, SABnzbd, NZBGet, Deluge, Transmission) and surfaces
-    it in the confirmation prompt. If any of it is running, the temp-file cleanup phase is skipped
-    entirely rather than risk touching an active transcode or extraction's temp files.
+    Before making changes, checks for common already-running server software (Plex, Jellyfin, Emby,
+    Sonarr, Radarr, Prowlarr, Bazarr, Lidarr, Readarr, qBittorrent, SABnzbd, NZBGet, Deluge,
+    Transmission, AMP, Source dedicated servers, Java/Minecraft, SteamCMD) and surfaces it in the
+    confirmation prompt. If any of it is running, the temp-file cleanup phase is skipped entirely
+    rather than risk touching an active transcode, extraction, or update's temp files.
 
 .PARAMETER DryRun
     Shows what would change without making changes.
@@ -49,8 +50,29 @@
     entirely - e.g. AMP instances, a Plex/Jellyfin library or transcode folder, a game server's
     data directory. Example: -ExclusionPaths "C:\AMP\Instances","D:\Plex\Transcode"
 
+    NOTE: when launching via the .bat launcher or any other "-File" invocation, PowerShell does not
+    parse comma-separated arrays the way it does in an interactive session - multiple values collapse
+    into one string. To work around this, a single value containing commas or semicolons is split
+    automatically, so both of these work identically:
+      -ExclusionPaths "C:\AMP\Instances","D:\Plex\Transcode"      (interactive session)
+      -ExclusionPaths "C:\AMP\Instances;D:\Plex\Transcode"        (.bat launcher / -File)
+
+.PARAMETER KeepSearch
+    Leaves Windows Search indexing (WSearch) enabled. Disabled by default since a headless box has
+    nothing local worth indexing, but if clients search this box's shared folders over SMB from
+    File Explorer, that search is served by the host's Windows Search index - pass this if you rely
+    on that.
+
+.PARAMETER CreateRestorePoint
+    Creates a System Restore point before making any changes (requires System Restore to be available
+    and enabled on this edition - not available on Windows Server). Not a substitute for a real
+    backup/VM snapshot, but a fast way to undo registry and feature changes if something goes wrong.
+    Windows only allows one restore point per 24 hours by default, so this may be a no-op if one was
+    already created recently.
+
 .PARAMETER LogPath
-    Where to write the log file. Defaults to Desktop.
+    Where to write the log file. Defaults to a folder under ProgramData (works regardless of whether
+    the current user's Desktop exists, e.g. when OneDrive Known Folder Move has relocated it).
 
 .EXAMPLE
     .\Win11VM-ServerOptimizer.ps1 -DryRun
@@ -62,13 +84,31 @@ param(
     [switch]$DryRun,
     [switch]$Force,
     [switch]$DisableDefender,
+    [switch]$KeepSearch,
+    [switch]$CreateRestorePoint,
     [string[]]$ExclusionPaths,
-    [string]$LogPath = "$env:USERPROFILE\Desktop\Win11VM-ServerOptimizer.log"
+    [string]$LogPath = "$env:ProgramData\Win11VM-ServerOptimizer\Win11VM-ServerOptimizer.log"
 )
+
+if ($ExclusionPaths) {
+    $ExclusionPaths = $ExclusionPaths | ForEach-Object { $_ -split '[,;]' } | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+}
+
+$logDir = Split-Path -Path $LogPath -Parent
+if (-not (Test-Path $logDir)) {
+    try {
+        New-Item -Path $logDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
+    } catch {
+        $fallback = Join-Path $env:TEMP "Win11VM-ServerOptimizer.log"
+        Write-Host "WARNING: Could not create log directory '$logDir' ($($_.Exception.Message)). Falling back to '$fallback'." -ForegroundColor Yellow
+        $LogPath = $fallback
+    }
+}
 
 $ErrorActionPreference = 'Continue'
 $script:changes = 0
-$script:ScriptVersion = '1.3.0'
+$script:errors = 0
+$script:ScriptVersion = '1.4.0'
 
 function Write-Banner {
     $lines = @(
@@ -114,6 +154,7 @@ function Invoke-Action {
         $script:changes++
     } catch {
         Write-Log "$Description -- FAILED: $($_.Exception.Message)" 'ERROR'
+        $script:errors++
     }
 }
 
@@ -121,6 +162,8 @@ $knownServerProcessNames = @(
     "Plex Media Server"
     "Plex Media Scanner"
     "PlexTranscoder"
+    "jellyfin"
+    "EmbyServer"
     "Sonarr"
     "Radarr"
     "Prowlarr"
@@ -132,6 +175,10 @@ $knownServerProcessNames = @(
     "nzbget"
     "deluge*"
     "transmission*"
+    "AMPInstMgr*"
+    "srcds*"
+    "java*"        # broad on purpose - Minecraft servers run as java.exe; worst case is an unnecessary skip
+    "steamcmd*"
 )
 
 function Get-RunningServerProcesses {
@@ -158,6 +205,14 @@ if (-not $DryRun -and -not $Force) {
         Write-Log "User declined confirmation - exiting without making changes." 'WARN'
         exit 0
     }
+}
+
+if ($CreateRestorePoint -and -not $DryRun) {
+    Invoke-Action "Create System Restore point" {
+        Enable-ComputerRestore -Drive "$env:SystemDrive\" -ErrorAction Stop
+        Checkpoint-Computer -Description "Win11VM-ServerOptimizer pre-change ($script:ScriptVersion)" -RestorePointType "MODIFY_SETTINGS" -ErrorAction Stop
+    }
+    Write-Log "Note: Windows only allows one restore point per 24 hours by default - if one was already created recently, no new one was made just now." 'INFO'
 }
 
 # ---------------------------------------------------------------------------
@@ -202,11 +257,17 @@ $appxToRemove = @(
 )
 
 foreach ($app in $appxToRemove) {
+    $installed = Get-AppxPackage -Name $app -AllUsers -ErrorAction SilentlyContinue
+    $provisioned = Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue | Where-Object DisplayName -like "*$app*"
+
+    if (-not $installed -and -not $provisioned) {
+        Write-Log "AppX package not present, nothing to remove: $app" 'SKIP'
+        continue
+    }
+
     Invoke-Action "Remove AppX package: $app" {
-        Get-AppxPackage -Name $app -AllUsers -ErrorAction SilentlyContinue | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
-        Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue |
-            Where-Object DisplayName -like "*$app*" |
-            Remove-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue | Out-Null
+        if ($installed) { $installed | Remove-AppxPackage -AllUsers -ErrorAction Stop }
+        if ($provisioned) { $provisioned | Remove-AppxProvisionedPackage -Online -ErrorAction Stop | Out-Null }
     }
 }
 
@@ -223,18 +284,32 @@ $featuresToDisable = @(
 )
 
 foreach ($feature in $featuresToDisable) {
+    $state = Get-WindowsOptionalFeature -Online -FeatureName $feature -ErrorAction SilentlyContinue
+    if (-not $state -or $state.State -eq 'Disabled') {
+        Write-Log "Optional feature already disabled or not present: $feature" 'SKIP'
+        continue
+    }
     Invoke-Action "Disable optional feature: $feature" {
-        Disable-WindowsOptionalFeature -Online -FeatureName $feature -NoRestart -ErrorAction SilentlyContinue | Out-Null
+        Disable-WindowsOptionalFeature -Online -FeatureName $feature -NoRestart -ErrorAction Stop | Out-Null
     }
 }
 
-Invoke-Action "Remove WordPad capability" {
-    Get-WindowsCapability -Online | Where-Object Name -like "Microsoft.Windows.WordPad*" |
-        Remove-WindowsCapability -Online -ErrorAction SilentlyContinue | Out-Null
+$wordpad = Get-WindowsCapability -Online -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "Microsoft.Windows.WordPad*" -and $_.State -eq 'Installed' }
+if ($wordpad) {
+    Invoke-Action "Remove WordPad capability" {
+        $wordpad | Remove-WindowsCapability -Online -ErrorAction Stop | Out-Null
+    }
+} else {
+    Write-Log "WordPad capability already removed or not present" 'SKIP'
 }
-Invoke-Action "Remove Steps Recorder capability" {
-    Get-WindowsCapability -Online | Where-Object Name -like "App.StepsRecorder*" |
-        Remove-WindowsCapability -Online -ErrorAction SilentlyContinue | Out-Null
+
+$stepsRecorder = Get-WindowsCapability -Online -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "App.StepsRecorder*" -and $_.State -eq 'Installed' }
+if ($stepsRecorder) {
+    Invoke-Action "Remove Steps Recorder capability" {
+        $stepsRecorder | Remove-WindowsCapability -Online -ErrorAction Stop | Out-Null
+    }
+} else {
+    Write-Log "Steps Recorder capability already removed or not present" 'SKIP'
 }
 
 # ---------------------------------------------------------------------------
@@ -244,6 +319,8 @@ Write-Log "--- Phase 3: Disabling unneeded services ---"
 
 # Deliberately NOT touching: LanmanServer/Workstation, W32Time, mpssvc (firewall),
 # BFE, Dnscache, Dhcp, RpcSs, WinDefend, TermService (RDP), wuauserv (set below, not disabled)
+# WerSvc (Windows Error Reporting) is also deliberately NOT touched - handy for diagnosing a
+# crashed game/media server process. See README if you want to disable it yourself.
 $servicesToDisable = @(
     "XblAuthManager"        # Xbox Live Auth
     "XblGameSave"           # Xbox Live Game Save
@@ -251,27 +328,42 @@ $servicesToDisable = @(
     "XboxGipSvc"            # Xbox Accessory Management
     "MapsBroker"            # Downloaded Maps Manager
     "lfsvc"                 # Geolocation
-    "WSearch"                # Windows Search indexing - VM has no local docs to index
+    "WSearch"                # Windows Search indexing - see -KeepSearch if clients search shares over SMB
     "SysMain"                # Superfetch - actively counterproductive on VM/vdisk storage
     "DiagTrack"              # Connected User Experiences and Telemetry
     "dmwappushservice"       # WAP Push message routing
     "RetailDemo"             # Retail Demo Service
     "Fax"
-    "WerSvc"                 # Windows Error Reporting service (kept for troubleshooting - comment out if unwanted)
     "PhoneSvc"
-    "BluetoothUserService"
+    "BluetoothUserService*"  # per-user service, name has a random per-session suffix - wildcard needed
     "bthserv"
 )
 
+if ($KeepSearch) {
+    $servicesToDisable = $servicesToDisable | Where-Object { $_ -ne 'WSearch' }
+    Write-Log "-KeepSearch set - leaving Windows Search indexing enabled." 'INFO'
+}
+
 foreach ($svc in $servicesToDisable) {
-    Invoke-Action "Stop and disable service: $svc" {
-        Get-Service -Name $svc -ErrorAction SilentlyContinue | Stop-Service -Force -ErrorAction SilentlyContinue
-        Set-Service -Name $svc -StartupType Disabled -ErrorAction SilentlyContinue
+    $services = @(Get-Service -Name $svc -ErrorAction SilentlyContinue)
+    if ($services.Count -eq 0) {
+        Write-Log "Service not present, nothing to disable: $svc" 'SKIP'
+        continue
+    }
+    foreach ($service in $services) {
+        if ($service.StartType -eq 'Disabled' -and $service.Status -eq 'Stopped') {
+            Write-Log "Service already stopped and disabled: $($service.Name)" 'SKIP'
+            continue
+        }
+        Invoke-Action "Stop and disable service: $($service.Name)" {
+            if ($service.Status -ne 'Stopped') { Stop-Service -Name $service.Name -Force -ErrorAction Stop }
+            Set-Service -Name $service.Name -StartupType Disabled -ErrorAction Stop
+        }
     }
 }
 
 Invoke-Action "Set Windows Update to notify only (not disabled - security patching still runs manually)" {
-    Set-Service -Name wuauserv -StartupType Manual -ErrorAction SilentlyContinue
+    Set-Service -Name wuauserv -StartupType Manual -ErrorAction Stop
 }
 
 # ---------------------------------------------------------------------------
@@ -295,8 +387,8 @@ $regTweaks = @(
 
 foreach ($tweak in $regTweaks) {
     Invoke-Action "Set $($tweak.Path)\$($tweak.Name) = $($tweak.Value)" {
-        if (-not (Test-Path $tweak.Path)) { New-Item -Path $tweak.Path -Force | Out-Null }
-        New-ItemProperty -Path $tweak.Path -Name $tweak.Name -Value $tweak.Value -PropertyType $tweak.Type -Force | Out-Null
+        if (-not (Test-Path $tweak.Path)) { New-Item -Path $tweak.Path -Force -ErrorAction Stop | Out-Null }
+        New-ItemProperty -Path $tweak.Path -Name $tweak.Name -Value $tweak.Value -PropertyType $tweak.Type -Force -ErrorAction Stop | Out-Null
     }
 }
 
@@ -319,8 +411,20 @@ $tasksToDisable = @(
 )
 
 foreach ($task in $tasksToDisable) {
+    $taskName = Split-Path $task -Leaf
+    $taskPath = (Split-Path $task -Parent) + '\'
+    $taskObj = Get-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction SilentlyContinue
+
+    if (-not $taskObj) {
+        Write-Log "Scheduled task not present: $task" 'SKIP'
+        continue
+    }
+    if ($taskObj.State -eq 'Disabled') {
+        Write-Log "Scheduled task already disabled: $task" 'SKIP'
+        continue
+    }
     Invoke-Action "Disable scheduled task: $task" {
-        Disable-ScheduledTask -TaskPath (Split-Path $task -Parent) -TaskName (Split-Path $task -Leaf) -ErrorAction SilentlyContinue | Out-Null
+        Disable-ScheduledTask -TaskPath $taskPath -TaskName $taskName -ErrorAction Stop | Out-Null
     }
 }
 
@@ -336,7 +440,7 @@ Invoke-Action "Disable hibernation" {
     powercfg /hibernate off
 }
 Invoke-Action "Disable Fast Startup" {
-    New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" -Name "HiberbootEnabled" -Value 0 -PropertyType DWord -Force | Out-Null
+    New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" -Name "HiberbootEnabled" -Value 0 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
 }
 Invoke-Action "Disable sleep (AC and DC)" {
     powercfg /change standby-timeout-ac 0
@@ -349,10 +453,10 @@ Invoke-Action "Disable sleep (AC and DC)" {
 Write-Log "--- Phase 7: Visual effects set to Best Performance ---"
 
 Invoke-Action "Set visual effects to Best Performance" {
-    New-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" -Name "VisualFXSetting" -Value 2 -PropertyType DWord -Force | Out-Null
+    New-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" -Name "VisualFXSetting" -Value 2 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
 }
 Invoke-Action "Disable transparency effects" {
-    New-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "EnableTransparency" -Value 0 -PropertyType DWord -Force | Out-Null
+    New-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "EnableTransparency" -Value 0 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
 }
 
 # ---------------------------------------------------------------------------
@@ -362,7 +466,6 @@ Write-Log "--- Phase 8: Network & background-task tuning ---"
 
 $serverRegTweaks = @(
     @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"; Name = "NetworkThrottlingIndex"; Value = 0xffffffff; Type = "DWord" }  # removes the ~10Mbps cap Windows puts on background network traffic
-    @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"; Name = "SystemResponsiveness"; Value = 0; Type = "DWord" }             # stop reserving CPU for foreground multimedia - there is none on a headless box
     @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization"; Name = "DODownloadMode"; Value = 0; Type = "DWord" }                               # HTTP only - no peer-to-peer upload/download of Windows Update payloads
     @{ Path = "HKCU:\System\GameConfigStore"; Name = "GameDVR_Enabled"; Value = 0; Type = "DWord" }
     @{ Path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR"; Name = "AllowGameDVR"; Value = 0; Type = "DWord" }
@@ -370,14 +473,20 @@ $serverRegTweaks = @(
 
 foreach ($tweak in $serverRegTweaks) {
     Invoke-Action "Set $($tweak.Path)\$($tweak.Name) = $($tweak.Value)" {
-        if (-not (Test-Path $tweak.Path)) { New-Item -Path $tweak.Path -Force | Out-Null }
-        New-ItemProperty -Path $tweak.Path -Name $tweak.Name -Value $tweak.Value -PropertyType $tweak.Type -Force | Out-Null
+        if (-not (Test-Path $tweak.Path)) { New-Item -Path $tweak.Path -Force -ErrorAction Stop | Out-Null }
+        New-ItemProperty -Path $tweak.Path -Name $tweak.Name -Value $tweak.Value -PropertyType $tweak.Type -Force -ErrorAction Stop | Out-Null
     }
 }
 
-Invoke-Action "Disable power management on network adapters (prevent NIC sleep)" {
-    Get-NetAdapterPowerManagement -ErrorAction SilentlyContinue |
-        Set-NetAdapterPowerManagement -AllowComputerToTurnOffDevice Disabled -ErrorAction SilentlyContinue
+$adaptersWithPowerMgmt = Get-NetAdapterPowerManagement -ErrorAction SilentlyContinue
+if (-not $adaptersWithPowerMgmt) {
+    Write-Log "No network adapters expose power management settings - skipping NIC power management" 'SKIP'
+} else {
+    Invoke-Action "Disable power management on network adapters (prevent NIC sleep)" {
+        # Some virtual adapters accept the query but reject the actual set - that's a common, expected
+        # condition (not a failure worth halting over), so this specific call stays SilentlyContinue.
+        $adaptersWithPowerMgmt | Set-NetAdapterPowerManagement -AllowComputerToTurnOffDevice Disabled -ErrorAction SilentlyContinue
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -385,8 +494,11 @@ Invoke-Action "Disable power management on network adapters (prevent NIC sleep)"
 # ---------------------------------------------------------------------------
 if ($ExclusionPaths) {
     foreach ($path in $ExclusionPaths) {
+        if (-not (Test-Path $path)) {
+            Write-Log "Exclusion path does not exist yet (Defender will still accept it, applies once something appears there): $path" 'WARN'
+        }
         Invoke-Action "Add Defender exclusion for folder: $path" {
-            Add-MpPreference -ExclusionPath $path -ErrorAction SilentlyContinue
+            Add-MpPreference -ExclusionPath $path -ErrorAction Stop
         }
     }
 } else {
@@ -396,7 +508,13 @@ if ($ExclusionPaths) {
 if ($DisableDefender) {
     Write-Log "DisableDefender flag set - disabling real-time protection. NOT recommended for hosts that pull updates/media from the internet." 'WARN'
     Invoke-Action "Disable Windows Defender real-time protection" {
-        Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
+        Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction Stop
+    }
+    if (-not $DryRun) {
+        $mpStatus = Get-MpComputerStatus -ErrorAction SilentlyContinue
+        if ($mpStatus -and $mpStatus.RealTimeProtectionEnabled) {
+            Write-Log "Real-time protection is STILL enabled after attempting to disable it. This usually means Tamper Protection is on - Set-MpPreference cannot override it. Disable Tamper Protection manually in Windows Security if you really want real-time protection off." 'WARN'
+        }
     }
 }
 
@@ -414,8 +532,13 @@ if ($script:runningServerProcesses) {
     }
 }
 
-Write-Log "=== Complete. $script:changes change(s) applied. A restart is recommended before starting your server workloads. ==="
+Write-Log "=== Complete. $script:changes change(s) applied, $script:errors error(s). A restart is recommended before starting your server workloads. ==="
 
 if ($DryRun) {
     Write-Log "This was a DRY RUN - nothing was actually changed. Re-run without -DryRun to apply." 'DRYRUN'
 }
+
+if ($script:errors -gt 0) {
+    exit 1
+}
+exit 0

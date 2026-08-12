@@ -6,7 +6,7 @@
 
 [GitHub Repository](https://github.com/theantipopau/Win11VM-ServerOptimizer)
 
-**Current version: v1.3.0** ([changelog](CHANGELOG.md))
+**Current version: v1.4.0** ([changelog](CHANGELOG.md))
 
 A PowerShell script that strips down a fresh Windows 11 Pro install for use as a **dedicated, headless-leaning server host** — game servers ([AMP](https://cubecoders.com/AMP), standalone Source/Java/Bedrock, etc.), media servers (Plex, Jellyfin, Emby), file shares, or any other always-on service.
 
@@ -39,7 +39,7 @@ This script instead:
 - **Power** — High Performance power plan, hibernation and Fast Startup disabled, sleep timers disabled (AC & DC)
 - **Visual effects** — set to Best Performance, transparency disabled (irrelevant over RDP anyway, but it's one less thing burning cycles)
 - **Windows Update** — set to Manual (not disabled — security patching still applies on demand)
-- **Network & background tasks** — removes the ~10Mbps throttle Windows puts on background network traffic (`NetworkThrottlingIndex`), stops reserving CPU for foreground multimedia that doesn't exist on a headless box (`SystemResponsiveness`), sets Delivery Optimization to HTTP-only (no peer-to-peer upload/download), disables Game Bar/GameDVR, and disables NIC power management so adapters can't be put to sleep under load
+- **Network & background tasks** — removes the ~10Mbps throttle Windows puts on background network traffic (`NetworkThrottlingIndex`), sets Delivery Optimization to HTTP-only (no peer-to-peer upload/download), disables Game Bar/GameDVR, and disables NIC power management so adapters can't be put to sleep under load
 - **Defender** — optional exclusions for your server data folders (AMP instances, Plex/Jellyfin libraries, etc.), recommended over disabling Defender
 - **Cleanup** — temp folders cleared on every run
 
@@ -77,6 +77,12 @@ Pass flags straight through to the launcher, e.g. `Run-Win11VM-ServerOptimizer.b
 
 Reboot once it completes, then install/configure your server software as normal. The script is idempotent, so it's safe to re-run after Windows Updates re-enable something.
 
+**Multiple values via the `.bat` launcher:** PowerShell's `-File` mode (what the launcher uses) doesn't parse comma-separated arrays the way an interactive session does, so `-ExclusionPaths "a","b"` collapses into one value there. Both of these now work identically regardless of how you launch it:
+```
+-ExclusionPaths "C:\AMP\Instances","D:\Plex\Transcode"     (interactive PowerShell)
+-ExclusionPaths "C:\AMP\Instances;D:\Plex\Transcode"        (.bat launcher / -File - semicolons)
+```
+
 ### Parameters
 
 | Parameter | Description |
@@ -85,9 +91,13 @@ Reboot once it completes, then install/configure your server software as normal.
 | `-Force` | Skips the confirmation prompt before making changes (for unattended/scripted runs) |
 | `-ExclusionPaths` | One or more folders (AMP instances, Plex/Jellyfin library or transcode dirs, game server data, etc.) to add as Windows Defender exclusions |
 | `-DisableDefender` | Fully disables Defender real-time protection (not recommended — prefer `-ExclusionPaths` above) |
-| `-LogPath` | Where to write the log file (defaults to Desktop) |
+| `-KeepSearch` | Leaves Windows Search indexing (WSearch) enabled — needed if clients search this box's shared folders over SMB from File Explorer |
+| `-CreateRestorePoint` | Creates a System Restore point before making changes (Windows client editions only; limited to one per 24h by Windows itself) |
+| `-LogPath` | Where to write the log file (defaults to `%ProgramData%\Win11VM-ServerOptimizer\`) |
 
-Running without `-DryRun` or `-Force` prompts for confirmation before making any changes. Before that prompt, the script checks for already-running server software (Plex, Sonarr, Radarr, Prowlarr, Bazarr, Lidarr, Readarr, qBittorrent, SABnzbd, NZBGet, Deluge, Transmission) and surfaces it so you know what's live before you continue. If any of it is detected, the temp-file cleanup phase (Phase 10) is skipped entirely, rather than risk touching an active transcode or archive-extraction's temp files — re-run during a maintenance window to clean those up.
+Running without `-DryRun` or `-Force` prompts for confirmation before making any changes. Before that prompt, the script checks for already-running server software (Plex, Jellyfin, Emby, Sonarr, Radarr, Prowlarr, Bazarr, Lidarr, Readarr, qBittorrent, SABnzbd, NZBGet, Deluge, Transmission, AMP, Source dedicated servers, Java/Minecraft, SteamCMD) and surfaces it so you know what's live before you continue. If any of it is detected, the temp-file cleanup phase (Phase 10) is skipped entirely, rather than risk touching an active transcode or archive-extraction's temp files — re-run during a maintenance window to clean those up.
+
+The script exits with code `1` if any action failed and `0` otherwise, and every logged line is one of `OK` (actually changed something), `SKIP` (nothing to do — already in the desired state), `ERROR` (failed), or `WARN`/`INFO` (informational) — so "N changes applied" only counts things that were genuinely acted on, not things that were already fine.
 
 ---
 
@@ -120,9 +130,9 @@ Or double-click `Run-Install-ServerSoftware.bat` (same self-elevation as the opt
 | `-Plex` | Installs Plex Media Server |
 | `-Jellyfin` | Installs Jellyfin Server |
 | `-Emby` | Installs Emby Server |
-| `-WingetId` | One or more extra winget package IDs to install as-is |
+| `-WingetId` | One or more extra winget package IDs to install as-is (same `.bat`-launcher comma/semicolon note as `-ExclusionPaths` above applies here too) |
 | `-All` | Shorthand for `-DockerEngine -Plex -Jellyfin -Emby` |
-| `-LogPath` | Where to write the log file (defaults to Desktop) |
+| `-LogPath` | Where to write the log file (defaults to `%ProgramData%\Win11VM-ServerOptimizer\`) |
 
 Running without `-DryRun` or `-Force` prompts for confirmation before installing anything. `-DockerEngine` needs to be run twice: once to enable the `Containers` feature, then again after a reboot to actually install Docker.
 
@@ -134,9 +144,10 @@ Docker Desktop is a GUI app with a system-tray presence, its own update cycle, a
 
 ## Notes
 
-- `WerSvc` (Windows Error Reporting) is left running by default — it's handy for diagnosing crashed game server processes. Comment it out of the `$servicesToDisable` array in the script if you don't want it.
+- `WerSvc` (Windows Error Reporting) is left running by default — it's handy for diagnosing crashed game/media server processes. Add it back into the `$servicesToDisable` array in the script if you don't want it.
 - HKCU registry tweaks (Widgets/Chat icon, visual effects, transparency) apply to whichever account runs the script. Run it under the same admin account you'll actually be logged in as.
 - `AllowTelemetry` is set to the minimum value the policy accepts; Windows 11 Pro clamps this to "Basic" regardless (only Enterprise/Education can go fully to zero) — this is a Windows platform limit, not a bug in the script.
+- `-DisableDefender` can silently fail to actually disable real-time protection if Windows Security's Tamper Protection is on (the default in Win11) — the script detects this after the fact and logs a warning telling you to turn off Tamper Protection manually if you really want it off.
 
 ---
 
