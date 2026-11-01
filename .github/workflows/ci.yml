@@ -32,11 +32,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install PSScriptAnalyzer
+      - name: Ensure PSScriptAnalyzer is available
         shell: powershell
         run: |
-          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
-          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -ErrorAction Stop
+          # windows-latest images usually ship PSScriptAnalyzer already. When they don't, a fresh
+          # runner has no PSGallery repository registered yet, so register it before installing -
+          # assuming it exists is what broke this job the first time.
+          if (Get-Module -ListAvailable -Name PSScriptAnalyzer) {
+              Write-Host 'PSScriptAnalyzer is already available on this runner.'
+          } else {
+              Install-PackageProvider -Name NuGet -Force -Scope CurrentUser -ErrorAction SilentlyContinue
+              if (-not (Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue)) {
+                  Register-PSRepository -Default -ErrorAction Stop
+              }
+              Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+              Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -ErrorAction Stop
+          }
 
       - name: Analyze scripts
         shell: powershell
