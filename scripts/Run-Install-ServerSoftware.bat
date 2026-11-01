@@ -5,18 +5,38 @@
 :: Any arguments passed to this .bat are forwarded as-is, e.g.:
 ::   Run-Install-ServerSoftware.bat -DryRun -All
 ::   Run-Install-ServerSoftware.bat -DockerEngine -Jellyfin
+:: Exits with the installer's own exit code (1 if any install failed), so this is
+:: usable from a scheduled task or wrapper as well as by double-click.
 
-setlocal
+setlocal EnableExtensions
 
 net session >nul 2>&1
-if %errorlevel% neq 0 (
-    echo Requesting administrator privileges...
-    powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -ArgumentList '%*' -Verb RunAs"
-    exit /b
-)
+if errorlevel 1 goto :need_elevation
 
 set "SCRIPT_DIR=%~dp0"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%Install-ServerSoftware.ps1" %*
+set "RC=%errorlevel%"
 
 echo.
+if not "%RC%"=="0" echo Install-ServerSoftware exited with code %RC% - see the log for details.
 pause
+exit /b %RC%
+
+:need_elevation
+call :elevate %*
+exit /b %errorlevel%
+
+:elevate
+:: Runs as its own subroutine so each line is expanded when it executes - the
+:: quoted self-path below needs the value set on the previous line.
+echo Requesting administrator privileges...
+set "SELF=%~f0"
+set "SELF=%SELF:'=''%"
+set "ELEVATED_ARGS=%*"
+set "ELEVATED_ARGS=%ELEVATED_ARGS:'=''%"
+powershell -NoProfile -Command "Start-Process -FilePath '%SELF%' -ArgumentList '%ELEVATED_ARGS%' -Verb RunAs"
+if errorlevel 1 (
+    echo Elevation was cancelled or failed - nothing was installed.
+    exit /b 1
+)
+exit /b 0

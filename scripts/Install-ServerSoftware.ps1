@@ -1,3 +1,4 @@
+#Requires -Version 5.1
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
@@ -59,6 +60,10 @@
 .PARAMETER LogPath
     Where to write the log file. Defaults to a folder under ProgramData (works regardless of whether
     the current user's Desktop exists, e.g. when OneDrive Known Folder Move has relocated it).
+    Rotated to <LogPath>.1 once it passes 5 MB, so repeated runs don't grow it without bound.
+
+    Exits with code 1 if any install failed, 0 otherwise, so scheduled/automated runs can tell the
+    difference between "everything already installed" and "something broke".
 
 .EXAMPLE
     .\Install-ServerSoftware.ps1 -DryRun -All
@@ -83,14 +88,32 @@ if ($WingetId) {
     $WingetId = $WingetId | ForEach-Object { $_ -split '[,;]' } | ForEach-Object { $_.Trim() } | Where-Object { $_ }
 }
 
-$logDir = Split-Path -Path $LogPath -Parent
-if (-not (Test-Path $logDir)) {
+function New-LogDirectory {
+    param([string]$Path, [string]$FallbackName)
+    $dir = Split-Path -Path $Path -Parent
+    if (-not $dir) { return $Path }
+    if (-not (Test-Path -LiteralPath $dir)) {
+        try {
+            New-Item -Path $dir -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        } catch {
+            $fallback = Join-Path $env:TEMP $FallbackName
+            Write-Host "WARNING: Could not create log directory '$dir' ($($_.Exception.Message)). Falling back to '$fallback'." -ForegroundColor Yellow
+            return $fallback
+        }
+    }
+    return $Path
+}
+
+$LogPath = New-LogDirectory -Path $LogPath -FallbackName 'Install-ServerSoftware.log'
+
+if (Test-Path -LiteralPath $LogPath) {
     try {
-        New-Item -Path $logDir -ItemType Directory -Force -ErrorAction Stop | Out-Null
+        $logItem = Get-Item -LiteralPath $LogPath -ErrorAction Stop
+        if ($logItem.Length -gt 5MB) {
+            Move-Item -LiteralPath $LogPath -Destination "$LogPath.1" -Force -ErrorAction Stop
+        }
     } catch {
-        $fallback = Join-Path $env:TEMP "Install-ServerSoftware.log"
-        Write-Host "WARNING: Could not create log directory '$logDir' ($($_.Exception.Message)). Falling back to '$fallback'." -ForegroundColor Yellow
-        $LogPath = $fallback
+        Write-Host "WARNING: Could not rotate the log file at '$LogPath' ($($_.Exception.Message)). Continuing to append to it." -ForegroundColor Yellow
     }
 }
 
@@ -103,7 +126,8 @@ if ($All) {
 
 $ErrorActionPreference = 'Continue'
 $script:changes = 0
-$script:ScriptVersion = '1.2.0'
+$script:errors = 0
+$script:ScriptVersion = '1.3.0'
 
 function Write-Banner {
     $lines = @(
@@ -149,15 +173,28 @@ function Invoke-Action {
         $script:changes++
     } catch {
         Write-Log "$Description -- FAILED: $($_.Exception.Message)" 'ERROR'
+        $script:errors++
     }
+}
+
+function Test-WingetPackageInstalled {
+    param([string]$Id)
+
+    $global:LASTEXITCODE = 0
+    $output = & winget list --id $Id --exact --accept-source-agreements 2>&1
+    $text = ($output | Out-String)
+
+    # The exit code alone is not trustworthy across winget versions: some report success with a
+    # "No installed package found" notice and no rows, so confirm the id actually appears.
+    if ($LASTEXITCODE -ne 0) { return $false }
+    if ($text -match '(?i)no (installed )?package found') { return $false }
+    return ($text -match [regex]::Escape($Id))
 }
 
 function Install-WingetPackage {
     param([string]$Id, [string]$FriendlyName)
 
-    $global:LASTEXITCODE = 0
-    winget list --id $Id --exact --accept-source-agreements 2>&1 | Out-Null
-    if ($LASTEXITCODE -eq 0) {
+    if (Test-WingetPackageInstalled -Id $Id) {
         Write-Log "$FriendlyName (winget id: $Id) is already installed - skipping" 'INFO'
         return
     }
@@ -214,6 +251,7 @@ if ($DockerEngine) {
             Write-Log "Containers feature was just enabled and requires a restart before Docker can be installed. Restart this machine, then re-run with -DockerEngine to finish installing Docker." 'WARN'
         }
     } else {
+        Write-Log "Note: DockerMsftProvider is legacy and only provides Windows containers (no Linux containers). For Linux containers on a Windows box, use WSL2 with Docker Desktop or run Docker on a Linux host instead." 'WARN'
         Invoke-Action "Install NuGet package provider (required by DockerMsftProvider)" {
             Install-PackageProvider -Name NuGet -Force -ErrorAction Stop | Out-Null
         }
@@ -258,8 +296,13 @@ if ($WingetId) {
     }
 }
 
-Write-Log "=== Complete. $script:changes change(s) applied. ==="
+Write-Log "=== Complete. $script:changes change(s) applied, $script:errors error(s). ==="
 
 if ($DryRun) {
     Write-Log "This was a DRY RUN - nothing was actually installed. Re-run without -DryRun to apply." 'DRYRUN'
 }
+
+if ($script:errors -gt 0) {
+    exit 1
+}
+exit 0

@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract-tests:
+    name: Contract tests
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run contract tests
+        shell: powershell
+        run: .\tests\Invoke-ScriptTests.ps1
+
+      - name: Run change-record behaviour tests
+        shell: powershell
+        run: .\tests\Invoke-StateRecordTests.ps1
+
+  analyze:
+    name: PSScriptAnalyzer
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PSScriptAnalyzer
+        shell: powershell
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -ErrorAction Stop
+
+      - name: Analyze scripts
+        shell: powershell
+        run: |
+          # -Path takes a single value, so the two folders are analyzed separately.
+          $findings = @()
+          foreach ($folder in @('scripts', 'tests')) {
+              $findings += Invoke-ScriptAnalyzer -Path $folder -Recurse -Settings ./PSScriptAnalyzerSettings.psd1
+          }
+          if ($findings) {
+              $findings | Format-Table -AutoSize | Out-String | Write-Host
+              Write-Host "PSScriptAnalyzer reported $($findings.Count) finding(s)."
+              exit 1
+          }
+          Write-Host 'PSScriptAnalyzer found no issues.'

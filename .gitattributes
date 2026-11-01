@@ -1,0 +1,6 @@
+# Keep the repository text as-is, with one exception that actually matters:
+# cmd.exe mis-handles goto/labels in a .bat file that has bare LF line endings,
+# so the launchers must always check out with CRLF regardless of the user's
+# core.autocrlf setting.
+* text=auto
+*.bat text eol=crlf
