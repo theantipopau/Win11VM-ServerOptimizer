@@ -6,7 +6,7 @@
 
 [GitHub Repository](https://github.com/theantipopau/Win11VM-ServerOptimizer)
 
-**Current version: v1.5.0** ([changelog](CHANGELOG.md))
+**Current version: v1.6.0** ([changelog](CHANGELOG.md))
 
 A PowerShell script that strips down a fresh Windows 11 Pro install for use as a **dedicated, headless-leaning server host** — game servers ([AMP](https://cubecoders.com/AMP), standalone Source/Java/Bedrock, etc.), media servers (Plex, Jellyfin, Emby), file shares, or any other always-on service.
 
@@ -24,6 +24,7 @@ This script instead:
 - **Strips aggressively**: consumer AppX bloat (Xbox stack, Widgets, Copilot, Cortana, OneDrive, etc.), telemetry, Search indexing, SysMain/Superfetch, hibernation/Fast Startup, unneeded scheduled tasks and services.
 - **Understands server workloads**: optional `-ExclusionPaths` parameter adds Defender exclusions for your AMP instances, Plex/Jellyfin library or transcode folders, or any other data directory — instead of disabling Defender outright.
 - **Can be undone**: it records the original state of everything it changes, so `Restore-ServerDefaults.ps1` can put the box back. See [Undoing it](#undoing-it).
+- **Stays undone**: `-Audit` compares the change record with the machine and exits non-zero if Windows Update or a policy put something back. See [Auditing for drift](#auditing-for-drift).
 
 ---
 
@@ -116,6 +117,9 @@ Pass flags straight through to the launcher, e.g. `Run-Win11VM-ServerOptimizer.b
 
 # Apply, with Defender exclusions for your server data folders
 .\scripts\Win11VM-ServerOptimizer.ps1 -ExclusionPaths "C:\AMP\Instances","D:\Plex\Transcode"
+
+# Tune for what the box actually does (defaults to GameServer)
+.\scripts\Win11VM-ServerOptimizer.ps1 -Profile MediaServer -ExclusionPaths "D:\Media"
 ```
 
 Reboot once it completes, then install/configure your server software as normal. The script is idempotent, so it's safe to re-run after Windows Updates re-enable something.
@@ -126,10 +130,57 @@ Reboot once it completes, then install/configure your server software as normal.
 -ExclusionPaths "C:\AMP\Instances;D:\Plex\Transcode"        (.bat launcher / -File - semicolons)
 ```
 
+### Auditing for drift
+
+Windows Update, a policy refresh or a reinstalled app can quietly put back something the script turned off. `-Audit` reads the change record, checks every entry in it against the machine as it is now, prints what changed, and exits — it applies nothing and never modifies the record.
+
+```powershell
+.\scripts\Win11VM-ServerOptimizer.ps1 -Audit
+```
+
+```
+Services      17 recorded, 1 drifted
+    drifted: DiagTrack is Automatic, expected Disabled
+Registry      25 recorded, 0 drifted
+Power          1 recorded, 0 drifted
+...
+=== Audit: 1 item(s) have drifted since this script ran. Re-run without -Audit to put them back, or add -DryRun to preview. ===
+```
+
+Exit code is `0` when the machine still matches the record and `1` when anything drifted or the record could not be read, so it can be scheduled and alerted on:
+
+```powershell
+$p = Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','.\scripts\Win11VM-ServerOptimizer.ps1','-Audit' -Wait -PassThru
+if ($p.ExitCode -ne 0) { Send-MailMessage -Subject 'Server drifted from its baseline' ... }
+```
+
+Two things worth knowing about what it compares:
+
+- Drift is measured against **the value the script sets**, not the old value it recorded for undo. A registry value that was absent before and is absent now is not drift; one the script set to `0` and Windows put back to `1` is.
+- Only entries **in the record** are checked, so a feature that never existed on this edition is never reported as missing. Registry values recorded before v1.6.0 carry no target value and are reported as unchecked rather than guessed.
+
+### Profiles
+
+`-Profile` tells the script what the box is *for*. Everything else is the same headless-server strip; the profile changes only the settings that are right for one workload and wrong for another. It defaults to `GameServer`, so existing usage is unchanged.
+
+| Profile | Tuned for | What it changes |
+|---|---|---|
+| `GameServer` (default) | AMP, Minecraft, Source and other tick-loop servers | Applies the base strip unchanged — processor scheduling, power throttling and NIC power management already cover what matters most for a tick loop. MMCSS `SystemResponsiveness` is deliberately left alone: it's the share of CPU guaranteed to non-multimedia work, which a game server is, so lowering it takes CPU away from the server. |
+| `MediaServer` | Plex, Jellyfin, Emby | Keeps the Media Player optional feature and `WMPNetworkSvc` — transcoders and older playback tools still register DirectShow filters against it — and leaves MMCSS at its default so decode/encode threads keep their reservation. |
+| `FileShare` | SMB file serving | Sets `LanmanServer\Parameters\Size = 3`, the documented "maximize data throughput for file sharing" memory profile. Takes effect when the Server service next starts. |
+
+Profile changes go through the same recorded write path as everything else, so `Restore-ServerDefaults.ps1` reverts them too. `-Profile X -DryRun` prints exactly what that profile keeps, adds, and any workload notes before it asks for confirmation:
+
+```powershell
+.\scripts\Win11VM-ServerOptimizer.ps1 -Profile MediaServer -DryRun
+```
+
 ### Parameters
 
 | Parameter | Description |
 |---|---|
+| `-Profile` | `GameServer` (default), `MediaServer` or `FileShare` — which workload to tune for, see [Profiles](#profiles) |
+| `-Audit` | Read-only: compares the change record with the machine and exits non-zero if anything drifted, see [Auditing for drift](#auditing-for-drift) |
 | `-DryRun` | Logs what would change without making changes (and without writing a change record) |
 | `-Force` | Skips the confirmation prompt before making changes (for unattended/scripted runs) |
 | `-ExclusionPaths` | One or more folders (AMP instances, Plex/Jellyfin library or transcode dirs, game server data, etc.) to add as Windows Defender exclusions, applied before any removal work |
@@ -192,7 +243,7 @@ Docker Desktop is a GUI app with a system-tray presence, its own update cycle, a
 
 ## Testing
 
-Two dependency-free suites (no Pester, no modules to install), so they run on any Windows PowerShell.
+Two dependency-free suites (no Pester, no modules to install), so they run on any Windows PowerShell — plus a third that only runs on a machine you are willing to destroy.
 
 `tests\Invoke-ScriptTests.ps1` checks the things that are easy to let drift and expensive to get wrong when the scripts only ever run on a real machine:
 
@@ -212,7 +263,32 @@ Two dependency-free suites (no Pester, no modules to install), so they run on an
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs both suites plus `PSScriptAnalyzer` ([settings](PSScriptAnalyzerSettings.psd1)) on every push and pull request.
 
-What the tests do **not** cover: actual system behaviour. They can't verify that a given Windows build still accepts a feature name or that removing an AppX package succeeds — that still needs a real VM and a `-DryRun` first.
+Those two suites check structure and the undo mechanism. They cannot tell you whether a particular Windows build still accepts a feature name, whether `Remove-AppxPackage` actually removed anything, or whether `Restore-ServerDefaults.ps1` genuinely puts the machine back — that is what the third suite is for.
+
+### Round-trip test on a throwaway VM
+
+[`tests\vm\Invoke-RoundTripTest.ps1`](tests/vm/Invoke-RoundTripTest.ps1) applies the real changes to the machine it runs on, verifies each one against the live system, re-runs to prove re-runs are safe, then restores and verifies the baseline is back. It is built around claims rather than around "the script logged OK":
+
+1. Baseline snapshot, taken from the same catalogs the optimizer targets (extracted from the optimizer's own AST, so the test follows the script instead of a copy of its lists).
+2. `-DryRun` changes nothing, writes no change record, and logs no `[OK]` line.
+3. The real run: every item in the change record must be in its new state afterwards, or be named in an `[ERROR]` line explaining why the OS refused.
+4. A second real run must do less work and leave the record's original values untouched — the "re-run after Windows Update" case.
+5. Restore, first dry then real: the machine must match the baseline again for everything reversible. Removed AppX packages are reported, not failed, because Windows cannot re-add them.
+
+It refuses to run without `-IAmInAThrowawayMachine`, so it cannot be pointed at a real box by accident.
+
+```powershell
+# Windows Sandbox (no ISO, no reboot): generate the .wsb, then open it
+.\tests\vm\New-SandboxConfig.ps1
+
+# Any Windows 11 VM, elevated:
+.\tests\vm\Invoke-RoundTripTest.ps1 -IAmInAThrowawayMachine
+
+# Validate the harness itself without changing anything (no admin needed)
+.\tests\vm\Invoke-RoundTripTest.ps1 -SelfTest
+```
+
+The full procedure — Sandbox and Hyper-V setup, what a passing run proves, which warnings are expected, and how to read a failure — is in [`tests\vm\README.md`](tests/vm/README.md). Results land in `artifacts\roundtrip-<timestamp>\` as a `report.md` plus the raw JSON snapshots and every log, which is the reproduction if something fails.
 
 ---
 

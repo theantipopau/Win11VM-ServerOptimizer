@@ -55,7 +55,7 @@ param(
     [string]$LogPath = "$env:ProgramData\Win11VM-ServerOptimizer\Restore-ServerDefaults.log"
 )
 
-$script:ScriptVersion = '1.0.0'
+$script:ScriptVersion = '1.0.1'
 $script:StateSchemaVersion = 1
 
 function New-LogDirectory {
@@ -353,7 +353,14 @@ if ($state.power -and $state.power.activeScheme) {
 
 if ($state.hibernation -and $state.hibernation.wasEnabled) {
     Write-Log "--- Restoring hibernation ---"
-    $hibernateEnabled = (Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Power' -Name 'HibernateEnabled' -ErrorAction SilentlyContinue).HibernateEnabled
+    # Same absent-value trap as the optimizer: HibernateEnabled only exists once hibernation has been
+    # toggled, so a machine that still has it on reports nothing here.
+    $powerKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Power'
+    $hibernateEnabled = (Get-ItemProperty -LiteralPath $powerKey -Name 'HibernateEnabled' -ErrorAction SilentlyContinue).HibernateEnabled
+    if ($null -eq $hibernateEnabled) {
+        $hibernateEnabled = (Get-ItemProperty -LiteralPath $powerKey -Name 'HibernateEnabledDefault' -ErrorAction SilentlyContinue).HibernateEnabledDefault
+    }
+    if ($null -eq $hibernateEnabled) { $hibernateEnabled = 1 }
     if ($hibernateEnabled -eq 1) {
         Write-Log "Hibernation already enabled" 'SKIP'
         $script:skipped++
@@ -420,7 +427,12 @@ if (@($state.appxRemoved).Count -gt 0) {
     Write-Log "These AppX packages were removed by the optimizer and cannot be re-added by script; reinstall anything you want back from the Microsoft Store: $((@($state.appxRemoved) | ForEach-Object { $_.name }) -join ', ')" 'WARN'
 }
 
-Write-Log "=== Complete. $script:changes change(s) applied, $script:skipped already in the requested state, $script:errors error(s). A restart is recommended if any optional feature or capability was re-enabled. ==="
+$summary = "=== Complete. $script:changes change(s) applied, $script:skipped already in the requested state, $script:errors error(s)."
+if (-not $DryRun) {
+    $summary += " A restart is recommended if any optional feature or capability was re-enabled."
+}
+$summary += " ==="
+Write-Log $summary
 
 if ($DryRun) {
     Write-Log "This was a DRY RUN - nothing was actually changed. Re-run without -DryRun to apply." 'DRYRUN'

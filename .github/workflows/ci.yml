@@ -25,6 +25,12 @@ jobs:
         shell: powershell
         run: .\tests\Invoke-StateRecordTests.ps1
 
+      # Validates the VM harness's catalog extraction and diff engine against the real optimizer.
+      # It needs no admin and changes nothing, so it belongs here rather than in the VM run.
+      - name: Round-trip harness self-test
+        shell: powershell
+        run: .\tests\vm\Invoke-RoundTripTest.ps1 -SelfTest
+
   analyze:
     name: PSScriptAnalyzer
     runs-on: windows-latest

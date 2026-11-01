@@ -215,6 +215,18 @@ if ($parsed.ContainsKey($optimizerName) -and $parsed.ContainsKey($restoreName)) 
             -Condition ($optimizerSchema.Groups[1].Value -eq $restoreSchema.Groups[1].Value) `
             -Detail ('optimizer ' + $optimizerSchema.Groups[1].Value + ', restore ' + $restoreSchema.Groups[1].Value)
     }
+
+    # Drift guard: a collection added to the change record but never read by the restore script would
+    # be recorded and silently ignored - the exact failure mode the record exists to prevent.
+    $written = @()
+    $written += @([regex]::Matches($parsed[$optimizerName].Text, "Add-StateRecord\s+-Collection\s+'([A-Za-z]+)'") | ForEach-Object { $_.Groups[1].Value })
+    $written += @([regex]::Matches($parsed[$optimizerName].Text, '\$script:state\.([A-Za-z]+)\s*=') | ForEach-Object { $_.Groups[1].Value })
+    $written = @($written | Sort-Object -Unique)
+    $read = @([regex]::Matches($parsed[$restoreName].Text, '\$state\.([A-Za-z]+)') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+    $unhandled = @($written | Where-Object { $read -notcontains $_ })
+
+    Test-Case -Name 'change-record collections are found in both scripts' -Condition ($written.Count -gt 0 -and $read.Count -gt 0) -Detail ("optimizer writes: " + ($written -join ', '))
+    Test-Case -Name 'restore reads every change-record collection the optimizer writes' -Condition ($unhandled.Count -eq 0) -Detail ('not read by restore: ' + ($unhandled -join ', '))
 }
 
 # ---------------------------------------------------------------------------
@@ -227,6 +239,53 @@ foreach ($name in $parsed.Keys) {
         Test-Case -Name ("{0} exits 0 on success" -f $name) -Condition ($text -match '(?m)^exit 0\s*$')
     }
     Test-Case -Name ("{0} writes a summary including the error count" -f $name) -Condition ($text -match 'error\(s\)')
+}
+
+# Windows only creates HibernateEnabled once hibernation has been toggled, so reading it alone
+# reports "off" on a machine where hibernation is on - and the record would then say it was never
+# enabled. Both scripts have to resolve the default the key actually carries.
+foreach ($name in @('Win11VM-ServerOptimizer.ps1', 'Restore-ServerDefaults.ps1')) {
+    if (-not $parsed.ContainsKey($name)) { continue }
+    Test-Case -Name ("{0} falls back to HibernateEnabledDefault when reading hibernation" -f $name) `
+        -Condition ($parsed[$name].Text -match 'HibernateEnabledDefault')
+}
+
+# ---------------------------------------------------------------------------
+Write-Section 'Profiles'
+# ---------------------------------------------------------------------------
+# A profile named in the ValidateSet but missing from the $Profiles table would be a silent no-op at
+# runtime (the script exits 1, but only when someone actually passes it), so check the two together.
+$optimizerName = 'Win11VM-ServerOptimizer.ps1'
+if ($parsed.ContainsKey($optimizerName)) {
+    $optimizerText = $parsed[$optimizerName].Text
+    $profileSet = [regex]::Match($optimizerText, "ValidateSet\((?<set>[^)]*)\)")
+    Test-Case -Name 'optimizer declares a profile set' -Condition $profileSet.Success
+    if ($profileSet.Success) {
+        $profileNames = @([regex]::Matches($profileSet.Groups['set'].Value, "'([^']+)'") | ForEach-Object { $_.Groups[1].Value })
+        Test-Case -Name 'optimizer offers the documented profiles' `
+            -Condition (($profileNames -join ',') -eq 'GameServer,MediaServer,FileShare') `
+            -Detail ($profileNames -join ', ')
+        foreach ($profileName in $profileNames) {
+            Test-Case -Name ("profile {0} has a configuration entry" -f $profileName) `
+                -Condition ($optimizerText -match ('(?m)^\s*' + [regex]::Escape($profileName) + '\s*=\s*@\{'))
+        }
+        Test-Case -Name 'a profile is applied to the service pass' -Condition ($optimizerText -match 'SkipServices')
+        Test-Case -Name 'a profile is applied to the feature pass' -Condition ($optimizerText -match 'SkipFeatures')
+    }
+}
+
+# ---------------------------------------------------------------------------
+Write-Section 'Audit mode'
+# ---------------------------------------------------------------------------
+# The audit is only meaningful if the record says what the script set each registry value to, and the
+# audit reads that same field. Check both halves so a rename cannot silently turn the comparison into
+# "everything is fine".
+if ($parsed.ContainsKey($optimizerName)) {
+    $optimizerText = $parsed[$optimizerName].Text
+    Test-Case -Name 'optimizer records the target value it writes' -Condition ($optimizerText -match 'targetValue\s*=\s*\$Value')
+    Test-Case -Name 'audit compares against the recorded target' -Condition ($optimizerText -match '\$entry\.targetValue')
+    Test-Case -Name 'audit exits nonzero when anything drifted' -Condition ($optimizerText -match 'if \(\$auditResult -ne 0\) \{ exit 1 \}')
+    Test-Case -Name 'audit runs before any phase' -Condition ($optimizerText -match '(?s)if \(\$Audit\) \{.*?Invoke-Audit.*?exit 0\s*\}')
 }
 
 # ---------------------------------------------------------------------------

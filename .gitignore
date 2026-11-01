@@ -1,0 +1,3 @@
+# Test-run output: round-trip reports, snapshots, dry-run logs and generated sandbox configs.
+# See tests/vm/README.md.
+artifacts/

@@ -42,6 +42,40 @@
     the way it was. AppX packages are not auto-restorable - Windows has no supported "re-add this
     consumer app" operation - so they are recorded for reporting only.
 
+.PARAMETER Profile
+    Which workload this box exists to serve. Every profile is the same "headless server" strip; they
+    differ only in the handful of settings that are right for one workload and wrong for another.
+
+      GameServer  (default) - latency-sensitive tick loops (AMP, Minecraft, Source). Applies the
+                              base strip unchanged: processor scheduling, power throttling and NIC
+                              power management already cover what matters most for a tick loop.
+                              MMCSS SystemResponsiveness is left alone on purpose - it is the
+                              share of CPU guaranteed to non-multimedia work, which a game server
+                              is, so lowering it takes CPU away from the server.
+      MediaServer           - Plex/Jellyfin/Emby. Keeps the Media Player optional feature and its
+                              network sharing service, because transcoders and older playback tools
+                              still register DirectShow filters against it. Leaves MMCSS at its
+                              default, since decode/encode threads are exactly what it prioritises.
+      FileShare             - SMB serving. Adds the documented LanmanServer "Size" memory profile
+                              (3 = maximize throughput for file sharing). Takes effect when the
+                              Server service next starts.
+
+    Everything a profile adds goes through the same recorded paths as the rest of the script, so
+    Restore-ServerDefaults.ps1 reverts it like any other change.
+
+.PARAMETER Audit
+    Audit mode: reads the change record and compares it with the machine as it is now, then exits.
+    Nothing is applied and the record is not modified. Useful after a Windows Update, or on a schedule,
+    to see what was re-enabled behind your back.
+
+    Items are compared against what this script sets them to, not against their old values, and only
+    for entries the record actually contains - so a feature that was never installed on this edition is
+    not reported as missing. Registry values recorded by 1.6.0 or later carry the value that was
+    written; older records have no target for them and say so instead of guessing.
+
+    Exits 0 when the machine still matches the record and 1 when anything drifted (or the record could
+    not be read), so it can be scheduled and alerted on. Takes precedence over -DryRun and -Force.
+
 .PARAMETER DryRun
     Shows what would change without making changes. Nothing is written to the change record.
 
@@ -95,10 +129,22 @@
 .EXAMPLE
     .\Win11VM-ServerOptimizer.ps1 -DryRun
     .\Win11VM-ServerOptimizer.ps1 -ExclusionPaths "C:\AMP\Instances","D:\Plex\Transcode"
+
+.EXAMPLE
+    .\Win11VM-ServerOptimizer.ps1 -Profile MediaServer -DryRun
+    .\Win11VM-ServerOptimizer.ps1 -Profile FileShare -ExclusionPaths "D:\Shares"
+
+.EXAMPLE
+    .\Win11VM-ServerOptimizer.ps1 -Audit
+    if ($LASTEXITCODE -ne 0) { Send-MailMessage -Subject 'Server drifted' ... }
 #>
 
 [CmdletBinding()]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidAssignmentToAutomaticVariable', '', Justification = 'The -Profile switch is the documented interface; it shadows $PROFILE, which this script never reads.')]
 param(
+    [ValidateSet('GameServer', 'MediaServer', 'FileShare')]
+    [string]$Profile = 'GameServer',
+    [switch]$Audit,
     [switch]$DryRun,
     [switch]$Force,
     [switch]$DisableDefender,
@@ -109,8 +155,66 @@ param(
     [string]$LogPath = "$env:ProgramData\Win11VM-ServerOptimizer\Win11VM-ServerOptimizer.log"
 )
 
-$script:ScriptVersion = '1.5.0'
+$script:ScriptVersion = '1.6.0'
 $script:StateSchemaVersion = 1
+
+# ---------------------------------------------------------------------------
+# Workload profiles
+# A profile does not change what this script considers unnecessary - it changes
+# which of the base changes still apply, and adds the settings that are right
+# for that workload. Anything added here goes through Set-RegValue, so it is
+# recorded and restored like every other value.
+# ---------------------------------------------------------------------------
+$Profiles = @{
+    GameServer  = @{
+        Title        = 'Game server'
+        Summary      = 'latency-sensitive tick loops (AMP, Minecraft, Source) - CPU jitter is the enemy'
+        SkipFeatures = @()
+        SkipServices = @()
+        Registry     = @()
+        Notes        = @(
+            'Applies the base strip unchanged; the settings that matter most for tick loops (processor scheduling, power throttling, NIC power management) are already in it.',
+            'MMCSS SystemResponsiveness is deliberately left at its default: it is the share of CPU guaranteed to non-multimedia work, which a game server is, so lowering it would take CPU away from the server process rather than give it more.',
+            'Tick rate, CPU affinity and NIC offload tuning are workload-specific and deliberately not touched here.'
+        )
+    }
+    MediaServer = @{
+        Title        = 'Media server'
+        Summary      = 'Plex/Jellyfin/Emby - sustained CPU/GPU transcoding and steady disk reads'
+        SkipFeatures = @('WindowsMediaPlayer')
+        SkipServices = @('WMPNetworkSvc')
+        Registry     = @()
+        Notes        = @(
+            'Keeps the Media Player feature and its network sharing service: transcoders and older playback tools still register DirectShow filters against it.',
+            'Hardware transcoding needs the GPU driver and passthrough configured - nothing here touches that.',
+            'MMCSS is left at its default, because decode/encode threads are the workload it prioritises.'
+        )
+    }
+    FileShare   = @{
+        Title        = 'File share'
+        Summary      = 'SMB serving - throughput and stability matter more than latency'
+        SkipFeatures = @()
+        SkipServices = @()
+        Registry     = @(
+            @{
+                Path  = 'HKLM:\SYSTEM\CurrentControlSet\Services\LanmanServer\Parameters'
+                Name  = 'Size'
+                Value = 3
+                Why   = 'LanmanServer Size 3 is the documented "maximize data throughput for file sharing" memory profile (1 = minimize, 2 = balance, 3 = maximize). Some client editions ignore it, which is harmless.'
+            }
+        )
+        Notes        = @(
+            'Add -KeepSearch if clients expect to search these shares from File Explorer.',
+            'The SMB memory profile takes effect when the Server service next starts; the recommended restart covers it.'
+        )
+    }
+}
+
+if (-not $Profiles.ContainsKey($Profile)) {
+    Write-Host ("ERROR: unknown profile '{0}'. Valid profiles: {1}." -f $Profile, (($Profiles.Keys | Sort-Object) -join ', ')) -ForegroundColor Red
+    exit 1
+}
+$profileConfig = $Profiles[$Profile]
 
 if ($ExclusionPaths) {
     $ExclusionPaths = $ExclusionPaths | ForEach-Object { $_ -split '[,;]' } | ForEach-Object { $_.Trim() } | Where-Object { $_ }
@@ -216,7 +320,7 @@ function Initialize-State {
                 throw "unrecognised change-record format (schemaVersion '$($loaded.schemaVersion)')"
             }
             $script:state = $loaded
-            Write-Log "Found an existing change record from $($script:state.firstRun); original values it holds will be preserved rather than re-recorded." 'INFO'
+            Write-Log "Found an existing change record from $($script:state.createdOn); original values it holds will be preserved rather than re-recorded." 'INFO'
             return
         } catch {
             if ($DryRun) {
@@ -322,20 +426,258 @@ function Set-RegValue {
         return
     }
 
-    if (-not (Get-StateRecord -Collection 'registry' -Match @{ path = $Path; name = $Name })) {
+    $recorded = Get-StateRecord -Collection 'registry' -Match @{ path = $Path; name = $Name }
+    if (-not $recorded) {
         Add-StateRecord -Collection 'registry' -Record ([pscustomobject]@{
                 path          = $Path
                 name          = $Name
                 existed       = $existed
                 originalValue = $current
+                targetValue   = $Value
                 type          = $Type
             })
+    } elseif ($recorded.targetValue -ne $Value) {
+        # targetValue is what this script writes, not an original value, so unlike originalValue it is
+        # allowed to change: a later release that writes a different value must not make -Audit report
+        # a healthy machine as drifted. This also backfills records written before the field existed.
+        $recorded | Add-Member -NotePropertyName 'targetValue' -NotePropertyValue $Value -Force
+        Save-State
     }
 
     Invoke-Action "Set $Path\$Name = $Value" {
         if (-not (Test-Path -LiteralPath $Path)) { New-Item -Path $Path -Force -ErrorAction Stop | Out-Null }
         New-ItemProperty -Path $Path -Name $Name -Value $Value -PropertyType $Type -Force -ErrorAction Stop | Out-Null
     }
+}
+
+# ---------------------------------------------------------------------------
+# Audit mode - compare the change record with the machine as it is now.
+# Read-only: nothing is applied and the record is only read. "Drift" is what
+# changed since this script last ran (Windows Update re-enabling something, a
+# policy, a reinstall), measured against the values this script sets - not
+# against the old values it recorded for undo.
+# ---------------------------------------------------------------------------
+function Get-AuditRegValue {
+    param([string]$Path, [string]$Name)
+    try {
+        $key = Get-Item -LiteralPath $Path -ErrorAction Stop
+        if ($key.GetValueNames() -contains $Name) {
+            return [pscustomobject]@{
+                present = $true
+                value   = $key.GetValue($Name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            }
+        }
+    } catch {
+        # A key that no longer exists is a missing value, which is exactly what the caller reports.
+        Write-Verbose "Registry key not readable: $Path ($($_.Exception.Message))"
+    }
+    return [pscustomobject]@{ present = $false; value = $null }
+}
+
+function Get-AuditPowerScheme {
+    try {
+        $output = (& powercfg /getactivescheme) -join ' '
+        if ($output -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})') {
+            return $Matches[1]
+        }
+    } catch {
+        Write-Verbose "Could not read the active power scheme: $($_.Exception.Message)"
+    }
+    return $null
+}
+
+function Write-AuditArea {
+    param(
+        [string]$Area,
+        [int]$Recorded,
+        [string[]]$Drifted,
+        [string[]]$Notes
+    )
+    if ($Recorded -eq 0) { return 0 }
+
+    $line = '{0} {1} recorded, {2} drifted' -f $Area.PadRight(14), $Recorded, $Drifted.Count
+    if ($Drifted.Count -gt 0) {
+        Write-Log $line 'WARN'
+    } else {
+        Write-Log $line 'INFO'
+    }
+    foreach ($item in $Drifted) { Write-Log "    drifted: $item" 'WARN' }
+    foreach ($note in $Notes) { Write-Log "    note: $note" 'INFO' }
+    return $Drifted.Count
+}
+
+function Invoke-Audit {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        Write-Log "No change record at '$Path', so there is nothing to audit. Run the optimizer first, or point -StatePath at the record if you moved it." 'ERROR'
+        return 1
+    }
+
+    try {
+        $record = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        Write-Log "Could not read the change record at '$Path' ($($_.Exception.Message))." 'ERROR'
+        return 1
+    }
+    if ($null -eq $record -or $record.schemaVersion -ne $script:StateSchemaVersion) {
+        Write-Log "The change record at '$Path' is not a format this script understands (schemaVersion '$($record.schemaVersion)', expected '$($script:StateSchemaVersion)')." 'ERROR'
+        return 1
+    }
+
+    $highPerformance = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
+    Write-Log "Change record written by optimizer v$($record.scriptVersion) on $($record.createdOn), last updated $($record.lastRun)." 'INFO'
+    $drift = 0
+
+    $problems = @()
+    $notes = @()
+    foreach ($entry in @($record.services)) {
+        $service = Get-Service -Name $entry.name -ErrorAction SilentlyContinue
+        if (-not $service) {
+            $notes += "$($entry.name) is no longer present on this build"
+            continue
+        }
+        if ($service.StartType -ne 'Disabled') {
+            $problems += "$($entry.name) is $($service.StartType), expected Disabled"
+        }
+    }
+    $drift += Write-AuditArea -Area 'Services' -Recorded @($record.services).Count -Drifted $problems -Notes $notes
+
+    $problems = @()
+    $notes = @()
+    foreach ($entry in @($record.features)) {
+        $feature = Get-WindowsOptionalFeature -Online -FeatureName $entry.name -ErrorAction SilentlyContinue
+        if (-not $feature) {
+            $notes += "$($entry.name) is no longer present on this build"
+            continue
+        }
+        if ($feature.State -ne 'Disabled') {
+            $problems += "$($entry.name) is $($feature.State), expected Disabled"
+        }
+    }
+    $drift += Write-AuditArea -Area 'Features' -Recorded @($record.features).Count -Drifted $problems -Notes $notes
+
+    $problems = @()
+    $notes = @()
+    foreach ($entry in @($record.capabilities)) {
+        $capability = Get-WindowsCapability -Online -Name $entry.name -ErrorAction SilentlyContinue
+        if (-not $capability) {
+            $notes += "$($entry.name) is no longer present on this build"
+            continue
+        }
+        if ($capability.State -eq 'Installed') {
+            $problems += "$($entry.name) is installed again, expected removed"
+        }
+    }
+    $drift += Write-AuditArea -Area 'Capabilities' -Recorded @($record.capabilities).Count -Drifted $problems -Notes $notes
+
+    $problems = @()
+    $notes = @()
+    foreach ($entry in @($record.tasks)) {
+        $task = Get-ScheduledTask -TaskName $entry.taskName -TaskPath $entry.taskPath -ErrorAction SilentlyContinue
+        if (-not $task) {
+            $notes += "$($entry.taskPath)$($entry.taskName) is no longer present on this build"
+            continue
+        }
+        if ($task.State -ne 'Disabled') {
+            $problems += "$($entry.taskPath)$($entry.taskName) is $($task.State), expected Disabled"
+        }
+    }
+    $drift += Write-AuditArea -Area 'Tasks' -Recorded @($record.tasks).Count -Drifted $problems -Notes $notes
+
+    $problems = @()
+    $notes = @()
+    $withoutTarget = 0
+    foreach ($entry in @($record.registry)) {
+        if (-not $entry.PSObject.Properties['targetValue']) {
+            $withoutTarget++
+            continue
+        }
+        $current = Get-AuditRegValue -Path $entry.path -Name $entry.name
+        $label = "$($entry.path)\$($entry.name)"
+        if (-not $current.present) {
+            $problems += "$label is missing, expected $($entry.targetValue)"
+        } elseif ($current.value -ne $entry.targetValue) {
+            $problems += "$label is $($current.value), expected $($entry.targetValue)"
+        }
+    }
+    $drift += Write-AuditArea -Area 'Registry' -Recorded (@($record.registry).Count - $withoutTarget) -Drifted $problems -Notes $notes
+    if ($withoutTarget -gt 0) {
+        Write-Log "$withoutTarget recorded registry value(s) carry no target (the record predates audit targets) and were not checked - re-run the optimizer to fill them in." 'WARN'
+    }
+
+    $problems = @()
+    $hasPower = [bool]($record.power -and $record.power.activeScheme)
+    if ($hasPower) {
+        $currentScheme = Get-AuditPowerScheme
+        if ($currentScheme -ne $highPerformance) {
+            $problems += "active scheme is $currentScheme, expected High Performance ($highPerformance)"
+        }
+    }
+    $drift += Write-AuditArea -Area 'Power' -Recorded ([int]$hasPower) -Drifted $problems -Notes @()
+
+    $problems = @()
+    $hasHibernation = [bool]$record.hibernation
+    if ($hasHibernation) {
+        if ((Get-HibernationEnabled) -ne 0) {
+            $problems += 'hibernation is enabled, expected disabled'
+        }
+    }
+    $drift += Write-AuditArea -Area 'Hibernation' -Recorded ([int]$hasHibernation) -Drifted $problems -Notes @()
+
+    $problems = @()
+    $hasReserved = [bool]$record.reservedStorage
+    if ($hasReserved) {
+        $reserved = $null
+        try {
+            $dismText = ((& dism.exe /Online /Get-ReservedStorageState) -join ' ') -replace "`0", ' '
+            if ($dismText -match 'Enabled') { $reserved = 'Enabled' } elseif ($dismText -match 'Disabled') { $reserved = 'Disabled' }
+        } catch {
+            Write-Verbose "Could not read reserved storage state: $($_.Exception.Message)"
+        }
+        if ($reserved -ne 'Disabled') {
+            $problems += "reserved storage is $reserved, expected Disabled"
+        }
+    }
+    $drift += Write-AuditArea -Area 'Reserved store' -Recorded ([int]$hasReserved) -Drifted $problems -Notes @()
+
+    $problems = @()
+    $notes = @()
+    $nicDevices = @(Get-CimInstance -Namespace root\wmi -ClassName MSPower_DeviceEnable -ErrorAction SilentlyContinue)
+    foreach ($entry in @($record.powerManagedAdapters)) {
+        $device = $nicDevices | Where-Object { $_.InstanceName -eq $entry.instanceName } | Select-Object -First 1
+        if (-not $device) {
+            $notes += "$($entry.instanceName) is no longer present"
+            continue
+        }
+        if ($device.Enable) {
+            $problems += "$($entry.instanceName) can be powered down again, expected disabled"
+        }
+    }
+    $drift += Write-AuditArea -Area 'NIC power' -Recorded @($record.powerManagedAdapters).Count -Drifted $problems -Notes $notes
+
+    $problems = @()
+    $removed = @($record.appxRemoved)
+    if ($removed.Count -gt 0) {
+        # Enumerated once rather than once per app: the record lists every consumer app the optimizer
+        # removed, and Get-AppxPackage -Name per entry is a second each on a slow box.
+        $installedNames = @(Get-AppxPackage -AllUsers -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name -Unique)
+        $provisioned = @(Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue)
+        foreach ($entry in $removed) {
+            $stillProvisioned = @($provisioned | Where-Object { $_.DisplayName -like "*$($entry.name)*" })
+            if ($installedNames -contains $entry.name -or $stillProvisioned.Count -gt 0) {
+                $problems += "$($entry.name) is installed again (the optimizer removed it)"
+            }
+        }
+    }
+    $drift += Write-AuditArea -Area 'Removed apps' -Recorded $removed.Count -Drifted $problems -Notes @()
+
+    if ($drift -gt 0) {
+        Write-Log "=== Audit: $drift item(s) have drifted since this script ran. Re-run without -Audit to put them back, or add -DryRun to preview. ===" 'WARN'
+        return 1
+    }
+    Write-Log '=== Audit: the machine still matches the change record. ===' 'INFO'
+    return 0
 }
 
 $knownServerProcessNames = @(
@@ -366,8 +708,46 @@ function Get-RunningServerProcess {
         Select-Object -ExpandProperty ProcessName -Unique | Sort-Object
 }
 
+function Get-HibernationEnabled {
+    # Windows only creates HibernateEnabled once hibernation has been toggled, so on a fresh install
+    # the value is absent while hibernation is in fact available (powercfg /a lists it). Reading only
+    # that value recorded 'was never enabled' on such a machine, and the restore script would then
+    # leave hibernation off forever. Fall back to the default the key does carry, then to Windows'
+    # real default. Shared by the apply path and the audit so the two cannot disagree.
+    $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\Power'
+    $value = (Get-ItemProperty -LiteralPath $key -Name 'HibernateEnabled' -ErrorAction SilentlyContinue).HibernateEnabled
+    if ($null -eq $value) {
+        $value = (Get-ItemProperty -LiteralPath $key -Name 'HibernateEnabledDefault' -ErrorAction SilentlyContinue).HibernateEnabledDefault
+    }
+    if ($null -eq $value) { $value = 1 }
+    return [int]$value
+}
+
 Write-Banner
-Write-Log "=== Win11VM-ServerOptimizer v$script:ScriptVersion starting (DryRun=$DryRun) ==="
+Write-Log "=== Win11VM-ServerOptimizer v$script:ScriptVersion starting (Profile=$Profile, DryRun=$DryRun, Audit=$Audit) ==="
+
+# Audit mode is read-only and takes precedence over -DryRun/-Force: no confirmation prompt, no record
+# write, no changes. Exits before any phase runs.
+if ($Audit) {
+    Write-Log 'Audit mode: comparing the change record with this machine. Nothing will be changed.' 'INFO'
+    $auditResult = Invoke-Audit -Path $StatePath
+    if ($auditResult -ne 0) { exit 1 }
+    exit 0
+}
+
+Write-Log "Profile: $($profileConfig.Title) - $($profileConfig.Summary)" 'INFO'
+if (@($profileConfig.SkipFeatures).Count -gt 0) {
+    Write-Log "Profile keeps (not disabled): optional feature(s) $($profileConfig.SkipFeatures -join ', ')" 'INFO'
+}
+if (@($profileConfig.SkipServices).Count -gt 0) {
+    Write-Log "Profile keeps (not disabled): service(s) $($profileConfig.SkipServices -join ', ')" 'INFO'
+}
+if (@($profileConfig.Registry).Count -gt 0) {
+    Write-Log "Profile adds: $((@($profileConfig.Registry) | ForEach-Object { $_.Name }) -join ', ')" 'INFO'
+}
+foreach ($profileNote in @($profileConfig.Notes)) {
+    Write-Log "Profile note: $profileNote" 'INFO'
+}
 
 $script:runningServerProcesses = Get-RunningServerProcess
 if ($script:runningServerProcesses) {
@@ -520,6 +900,11 @@ $featuresToDisable = @(
     "FaxServicesClientPackage"
 )
 
+# Features a profile needs to survive (MediaServer keeps Media Player for legacy DirectShow filters).
+if (@($profileConfig.SkipFeatures).Count -gt 0) {
+    $featuresToDisable = @($featuresToDisable | Where-Object { $profileConfig.SkipFeatures -notcontains $_ })
+}
+
 foreach ($feature in $featuresToDisable) {
     $featureInfo = Get-WindowsOptionalFeature -Online -FeatureName $feature -ErrorAction SilentlyContinue
     if (-not $featureInfo -or $featureInfo.State -eq 'Disabled') {
@@ -591,6 +976,11 @@ $servicesToDisable = @(
     "BluetoothUserService*" # per-user service, name has a random per-session suffix - wildcard needed
     "bthserv"
 )
+
+# Services a profile needs to survive (MediaServer keeps Media Player network sharing).
+if (@($profileConfig.SkipServices).Count -gt 0) {
+    $servicesToDisable = @($servicesToDisable | Where-Object { $profileConfig.SkipServices -notcontains $_ })
+}
 
 if ($KeepSearch) {
     $servicesToDisable = $servicesToDisable | Where-Object { $_ -ne 'WSearch' }
@@ -714,7 +1104,7 @@ try {
 
 if ($null -eq $script:state.power) {
     if ($DryRun) {
-        Write-Log "DRY RUN - would record the active power scheme ($activeScheme) before changing it" 'DRYRUN'
+        Write-Log "DRY RUN - would record the active power scheme ($activeScheme) as the value to restore" 'DRYRUN'
     } else {
         $script:state.power = [pscustomobject]@{ activeScheme = $activeScheme }
         Save-State
@@ -729,11 +1119,12 @@ if ($activeScheme -eq '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c') {
     }
 }
 
-$hibernationKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Power'
-$hibernateEnabled = (Get-ItemProperty -LiteralPath $hibernationKey -Name 'HibernateEnabled' -ErrorAction SilentlyContinue).HibernateEnabled
+$hibernateEnabled = Get-HibernationEnabled
+$hibernateLabel = 'disabled'
+if ($hibernateEnabled -eq 1) { $hibernateLabel = 'enabled' }
 if ($null -eq $script:state.hibernation) {
     if ($DryRun) {
-        Write-Log "DRY RUN - would record whether hibernation was enabled before disabling it" 'DRYRUN'
+        Write-Log "DRY RUN - hibernation is currently $hibernateLabel; would record that as the value to restore" 'DRYRUN'
     } else {
         $script:state.hibernation = [pscustomobject]@{ wasEnabled = ($hibernateEnabled -eq 1) }
         Save-State
@@ -790,6 +1181,13 @@ Set-RegValue -Path "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl" -Nam
 # server the "background" process is the workload; without this, long-running service work can be
 # scheduled onto low-power cores or capped.
 Set-RegValue -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power\PowerThrottling" -Name "PowerThrottlingOff" -Value 1
+
+# Profile-specific tuning. Same recorded path as every other value, so Restore-ServerDefaults.ps1
+# reverts it with the rest - a profile must not be a one-way door.
+foreach ($tweak in @($profileConfig.Registry)) {
+    Write-Log "Profile tuning: $($tweak.Why)" 'INFO'
+    Set-RegValue -Path $tweak.Path -Name $tweak.Name -Value $tweak.Value
+}
 
 # "Allow the computer to turn off this device to save power" is not exposed by
 # Set-NetAdapterPowerManagement (no such parameter - the previous call here silently did nothing)
@@ -938,8 +1336,18 @@ if ($script:runningServerProcesses) {
 
 Save-State
 
-Write-Log "=== Complete. $script:changes change(s) applied, $script:errors error(s). A restart is recommended before starting your server workloads. ==="
-Write-Log "Change record: $StatePath - pass it to Restore-ServerDefaults.ps1 to undo this run." 'INFO'
+$summary = "=== Complete ($($profileConfig.Title) profile). $($script:changes) change(s) applied, $($script:errors) error(s)."
+if (-not $DryRun) {
+    $summary += " A restart is recommended before starting your server workloads."
+}
+$summary += " ==="
+Write-Log $summary
+
+if ($DryRun) {
+    Write-Log "No change record was written - a dry run records nothing to undo." 'INFO'
+} else {
+    Write-Log "Change record: $StatePath - pass it to Restore-ServerDefaults.ps1 to undo this run." 'INFO'
+}
 
 if ($DryRun) {
     Write-Log "This was a DRY RUN - nothing was actually changed. Re-run without -DryRun to apply." 'DRYRUN'
